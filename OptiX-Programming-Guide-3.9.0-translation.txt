@@ -1,0 +1,13 @@
+NVIDIA OptiX 射线追踪引擎
+
+编程指南
+
+Version 3.9
+
+2015年2月12日
+
+翻译目的：
+进一步加强自己对OptiX的理解与记忆，翻译必然会存在理解上或者表达上的错误，一经发现，立即改正提交。
+
+资源发布在Github：https://github.com/zspark/OptiX-Programming-Guide-3.9.0-translation.git
+
