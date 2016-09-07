@@ -30,3 +30,21 @@ C代码的机制去实现着色（包括
 <<>>OptiX的核心是个简单但是强大的对光线追踪器的抽象。这个光线追踪器利用用户提供的程序初始化光线，让光线与表面相交，给材质着色，引发新的光线（译注：比如透明物体需要在相交点再次发射光线以获取背后物体的信息）。光线携带的用户自定义数据描述了每一条射线各自的变量，比如颜色，迭代深度，重要程度，或者其它的一些属性。开发者利用基于CUDA
 C提供的函数为这些属性提供具体的功能。因为光线追踪是个固有的递归算法，OptiX允许用户递归新的射线，内部执行机制管理着所有的递归堆栈的细节。OptiX提供了动态函数派发与高端的变量继承机制，让光线追踪系统能够被普遍与紧凑的编写。
 
+## 1.2 射线追踪基础
+<<>>“射线追踪”这个术语的含义需要依赖上下文。有时它指一条3D射线与一组3D对象（比如一个球体）之间交点的计算。有时它指一个专门的算法，比如Whitted的图像生成方法，或者是一个石油开采业中用来模拟地波扩展的算法。有时又用来表示Whitted算法与射线发射等算法的集合。OptiX是一个射线追踪引擎：它允许用户用来对3D物体相交，（待译），另外，OptiX提供给用户自己编写诸如射线生成，这些射线碰撞到物体的具体行为的功能。
+<<>>图形学中，射线追踪最早由Arthur Appel与1968年为渲染固态对象而提出，Turner
+Whitted提出了利用递归计算反射、折射的可行性进一步发展了这么技术。后续的发展加入了景深效果，互相反射下的漫反射，软阴影，模糊动画等等加强了渲染结果的准确性。同时，许多研究者利用新的算法为场景中物体建立索引增加了射线追踪的性能。基于射线追踪的真实渲染算法被用来准确的模拟光线的传输。一些这样的算法模拟了虚拟环境下光子的衍生。（待译：物理方面的，比较难）。一些算法还利用了双向方法。OptiX工作在这些算法之下，所以可以用来实现这些算法中的任何一个。
+<<>>射线追踪经常被用在“非图像”的应用中。在计算机辅助设计中，射线追踪被用来预算复杂部件的体积（容积）：向这个部件发射一组平行的射线，部分碰撞到该部件的射线返回横截面的面积，光线的平均长度告诉我们平均的深度。射线追踪也可以用来判断复杂移动物体的街进行（包括碰撞）。通常采用从对象表面发射“试探”光线去判断什么东西在附近。射线还被鼠标用来选择物体，从而判断哪些对象在一个像素中是可见的，也用来在游戏中做投掷物的碰撞。OptiX可以在上面任何应用中胜任。
+<<>>射线追踪算法的常规特性就是用来计算3D射线与一组表面（被称为“模型”或者“场景”）的交点。在着色应用中，射线与模型在视觉属性上的交点决定了这条射线会会发生什么（比如，它可能会被反射、折射或者吸收）。其他应用可能除了交点位置以外不关心其他信息，甚至不关心是否相交。这种需求的多样性意味着OptiX的支持多种射线场景查询，射线与场景相交的用户定义的行为是值得做的。
+<<>>射线追踪一个点赞的特性就是它可以方便的支持任意几何对象与一条3D直线的相交。比如，它可以直接支持球体而不需要曲面细分。另一个点赞的特性就是射线追踪的执行普遍成次线性（sub-linear）————加倍场景中物体的数量，并不会加倍执行的时间。这是用组织物体形成了加速结构体（译注：一个数据结构，用于加速碰撞检测，就是粗检测）来完成的，该结构体可以快速的排除全部对象图元与一些射线相交的可能性。场景中静止的对象，这种结构体可以一直使用（不需要重新计算），动态的对象的话，OptiX支持在必要的时候重新计算这种结构。这个结构体仅仅需要查询它所包含的几何体的包围盒数据，所以新的图元类型的加入不会影响加速结构体的正常工作（也不需要变动数据），只要新的图元能提供包围盒数据。
+<<>>图形图像的应用程序中，射线追踪要比光栅化好。一个好处是可以方便的支持普通的照相机模型；用户可以用任意方向关联屏幕上的点，没有要求起点一致。另一个优点是重要的视觉效果比如反射、折射能够被短短几行代码所支持，硬投影可以不借助阴影映射而生成，软投影也不是很难。
+<<>>进一步说，射线追踪可以作为一个材质生成的管线与传统图形图像程序互溶。比如，可以用深度缓存中的点作为射线起点去计算镜面反射。还有很多使用z缓冲区与射线追踪技术的“混合算法”。
+<<>>进一步了解射线追踪在图形图像方面的信息，参考如下：
+* The classic and still relevant book is “An Introduction to Ray Tracing” (Edited by A. Glassner, Academic Press, 1989).
+* A very detailed beginner book is "Ray Tracing from the Ground Up" (K. Suffern, AK Peters, 2007).
+* A concise description of ray tracing is in “Fundamentals of Computer Graphics” (P. Shirley and S. Marschner, AK Peters, 2009).
+* A general discussion of realistic batch rendering algorithms is in "Advanced Global Illumination" (P. Dutré, P. Bekaert, K. Bala, AK Peters, 2006).
+* A great deal of detailed information on ray tracing and algorithms that use ray tracing is in "Physically Based Rendering" (M. Pharr and G.  Humphreys, Morgan Kaufmann, 2004).
+* A detailed description of photon mapping is in “Realistic Image Synthesis Using Photon Mapping” (H. Jensen, AK Peters, 2001).
+* A discussion of using ray tracing interactively for picking and collision detection, as well as a detailed discussion of shading and ray-primitive
+intersection is in "Real-Time Rendering" (T. Akenine-Möller, E. Haines, N. Hoffman, AK Peters, 2008).
