@@ -1,2 +1,2 @@
-# OptiX-Programming-Guide-3.9.0-translation
-对OptiX编程指南3.9版本的中文翻译
+## 对OptiX编程指南3.9版本的中文翻译
+## 希望有开发OptiX的朋友一起分章节翻译。
