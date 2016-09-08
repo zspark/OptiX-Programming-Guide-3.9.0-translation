@@ -48,3 +48,96 @@ Whitted提出了利用递归计算反射、折射的可行性进一步发展了�
 * A detailed description of photon mapping is in “Realistic Image Synthesis Using Photon Mapping” (H. Jensen, AK Peters, 2001).
 * A discussion of using ray tracing interactively for picking and collision detection, as well as a detailed discussion of shading and ray-primitive
 intersection is in "Real-Time Rendering" (T. Akenine-Möller, E. Haines, N. Hoffman, AK Peters, 2008).
+
+
+# 第二章 编程模型总揽
+<<>>OptiX的编程模型由两部分组成：C端代码与GPU设备端的程序。这章介绍对象，程序（译注：G端程序），和在C端定义G端使用的变量。
+
+## 2.1 对象模型
+<<>>OptiX是一个基于对象的C
+API，实现了一个简单的对象模型层级结构。执行在G端的程序增强了这种面向对象的接口。系统的主要对象如下：
+
+* 上下文（Context）：一个运行着的OptiX引擎实例；
+* 程式（Program）：一个CUDA
+* C的函数，被编译为NVIDIA的PTX虚汇编语言；（译注：Program我在这里专门翻译为‘程式’，以区分其与正常C端程序的不同）
+* 变量（Variable）：一个名称用来传递C端数据到OptiX的程式；
+* 缓冲区（Buffer）：一个多维度的数组，可以绑定到变量；
+* 纹理采样器（TextureSampler）：一个或者多个绑定了差值机制的缓冲区；
+* 材质（Material）：在射线与最近图元相交时或者潜在相交时执行的一组程式；
+* 几何实例（GeometryInstance）：一个绑定了几何体与材质的对象；
+* 组（Group）：一个具有层级结构的一组对象；
+* 几何组（GeometryGroup）：一组由几何实例组成的对象；
+* 变换（Transform）：一个层级结构下节点，可以几何变换射线，以至于变化几何对象；
+* 选择器（Selector）：一个可编程的层级结构节点，用来选择哪些子节点（children）被遍历；
+* 加速器（Acceleration）：一个加速结构体对象，可以用来绑定到层级结构节点；
+* 远端设备（RemoteDevice）：一个为了远程视觉渲染的网络连接；
+
+<<>>这些对象的创建、销毁、修改与绑定都是通过C端API实现，进一步的细节参考第三章。OptiX的行为可以通过对这些对象的任意配置而控制。
+
+## 2.2 程式
+<<>>Optix提供的射线追踪管线包含一些可编程的组件（程式）。这些程式会由GPU在执行射线追踪算法的特定时刻而调用执行。一共有8中不同的程式：
+
+* 射线生成（Ray Generation）：这是进入射线追踪管线的接口点，由系统并行的为每一个像素、采样或者其他用户定义的工作而调用执行；
+* 异常（Exception）：异常句柄，在诸如堆栈溢出和其他一些错误的时候调用；
+* 最近碰撞（Closest Hit）：跟踪的射线找到最近的相交点后调用，用于材质着色；
+* 任意碰撞（Any Hit）：跟踪的射线找到一个全新的潜在最近相交点后调用，用于阴影计算；
+* 相交（Intersection）：在遍历的时候调用，实现射线与图元的相交测试；
+* 包围盒（Bounding Box）：计算图元在世界空间下的包围盒，在系统创建了一个加速结构体后调用；
+* 丢失（Miss）：当射线与场景中所有几何体都不相交时调用；
+* 访问（Visit）：当遍历选择节点的时候调用，用来决定哪些子节点（Children）会被便利到；（译注：选择节点没有加速结构体，也不是个实体对象，比如几何体。它的调用是在OptiX判断射线与其子节点相交的时候）；
+
+<<>>这些程式的输入语言叫PTX。OptiX SDK同样为NVIDIA C编译器（nvcc）提供一组包装类与头文件，它提供了一种用CUDA C编写PTX的方式。这些程式的进一步细节见第四章。
+
+## 2.3 变量
+<<>>OptiX提供一种灵活的且强大的变量系统，用来将数据与程式连接起来。当OptiX程式引用一个变量的时候，一个良好定义的作用域集便会帮助它查询这个变量的定义。这允许为查找来的变量动态的为重写定义。
+<<>>举例来说，一个最近碰撞程式引用了一个变量叫做color.这个程式可能被附加（attach）在好几个材质对象上，而这些材质对象依次又附加在几何实例对象上，最近碰撞程式上的变量首先查找该程式对象上的定义，然后依次查找几何实例，材质，最后查找上下文对象。这就可以在材质对象上定义color这个变量的默认值，但是在具体的几何实例对象上定义变量color的其它值从而重写材质对象上的color默认值。（译注：因为在最近碰撞程式上几何实例对象作用域查找要优先于材质对象，不同程式查找顺序不同。）参见3.4节以获取更多信息。
+
+## 2.4 执行模型
+<<>>当所有的这些对象，程式，变量被集成在可用的上下文（Context）后，射线生成程式可能需要被执行了（launched）。执行时候需要纬度信息和尺寸信息，并且会调用执行射线生成程式好多遍，具体次数视尺寸而定。
+<<>>当射线生成程式被调用后，一个特殊的语义变量（semantic variable）可能会被查询用来定位运行时的射线生成程式。举例来说，一个常规的用法是执行（launch）一个二维程式，其高宽符合将要被渲染的图像的像素尺寸。参见4.3.2节获取更多信息。
+
+# 第三章 客户端API
+## 3.1 上下文
+<<>>一个OptiX的上下文控制着射线追踪引擎的装配与后序的工作。上下文通过rtContextCreate函数创建。上下文对象封装了所有OptiX的资源————纹理，几何体，用户定义的程式等等，上下文的销毁通过调用rtContextDestroy函数，它会销毁所有资源并且将这些资源的句柄失效。
+<<>>rtContextLaunch{1,2,3}D是射线引擎计算的入口函数。发射函数（rtContextLaunchXD）需要一个入口点作为参数（入口点3.1.1节讨论），1个，2个或者3个格子纬度参数。纬度建立了一个逻辑上的计算网格。rtContextLaunch执行的时候，一切必要的预处理过程需要先执行，然后执行射线生成程式，这个程式是绑定到对应的接口点的，并且会被计算网格中的每一个格子所调用。预处理包括状态的验证，必要的话还会执行加速结构体的创建（译注：可能是第一次全新创建，也可能是由于动态设置为dirty后的再次创建）与内核编译。发射函数的输出由OptiX缓冲区传递回来，缓冲区的纬度一般（非必须）是计算网格的纬度。
+
+{% highlight c++%}
+RTcontext context;
+rtContextCreate( &context );
+unsigned int entry_point = ...;
+unsigned int width = ...;
+unsigned int height = ...;
+// Set up context state and scene description
+...
+rtContextLaunch2D( entry_point, width, height );
+rtContextDestroy( context );
+{% endhighlight %}
+
+<<>>可以在有限的情况下激活好多上下文，但这没有必要，一个上下文对象可以支配多硬件设备。要使用的设备数量可以通过rtContextSetDevices函数设置。默认是最大的可支持OptiX的计算设备数量（译注：不确定这里的翻译）。下面的一些规则可以确定设备的兼容性。这些规则将来会改变。如果一个不兼容的设备被选择会由rtContextSetDevices抛出一个错误.
+
+* All SM 3.5 devices can be run in multi-GPU configurations with other SM 3.5 devices.
+* All SM 3.0 devices can be run in multi-GPU configurations with other SM 3.0 devices.
+* All SM 2.X devices can be run in multi-GPU configurations with other SM 2.X devices.
+* All SM 1.2 and 1.3 devices can be run in multi-GPU configuration with other SM 1.2 and 1.3 devices.
+* All SM 1.1 and 1.0 devices can only be run in single-GPU configurations.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
