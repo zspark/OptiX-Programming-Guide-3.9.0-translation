@@ -121,21 +121,110 @@ rtContextDestroy( context );
 * All SM 1.2 and 1.3 devices can be run in multi-GPU configuration with other SM 1.2 and 1.3 devices.
 * All SM 1.1 and 1.0 devices can only be run in single-GPU configurations.
 
+### 3.1.1 接入点
+<<>>每一个上下文可能含有多个计算接入点。一个接入点被关联在一个的射线生成程式与一个（可选的）异常程式上。一个上下文可以通过rtContextSetEntryPointCount设置接入点的数量。接入点关联程式的设定与获取通过函数：
+rtContext{Set|Get}RayGenerationProgram
+rtContext{Set|Get}ExceptionProgram
+每一个接入点在使用的时候必须关联一个射线生成程式，异常程式是可选的。多接入点的机制允许在不同的渲染算法之间切换，也方便在一个OptiX上下文上进行多通道渲染技术的实现。
+
+{% highlight c++ %}
+RTcontext context = ...;
+rtContextSetEntryPointCount( context, 2 );
+RTprogram pinhole_camera = ...;
+RTprogram thin_lens_camera = ...;
+RTprogram exception = ...;
+rtContextSetRayGenerationProgram( context, 0,
+pinhole_camera );
+rtContextSetRayGenerationProgram( context, 1,
+thin_lens_camera
+);
+rtContextSetExceptionProgram( context, 0, exception
+);
+rtContextSetExceptionProgram( context, 1, exception
+);
+{% endhighlight %}
 
 
+### 3.1.2 射线类型（译注：注意区别8中不同的程式，完全两个目的，两个意思，不要混淆）
+<<>>OptiX支持射线类型这么一个标记，主要用于在跟踪过程中区分不同的射线以达到不同的目的。比如，一个渲染器可能需要区别用于计算颜色的与用于判断是否与光源可见的不同射线（阴影射线）。合理的归类像这样不同定义的射线不仅有助于增强程式的模块性，也有利于OptiX更高效的运算。
+<<>>射线类型与射线的行为完全由应用程序定义。射线类型的数量可以通过rtContextSetRayTypeCount函数设置。下面这些属性在不同的射线类型中可能是有却别的：
+
+* 射线的夹带数据（译注：我喜欢将payload翻译成夹带，好比考试作弊夹带纸条一样，虽然与考试本身没有关系，但很重要，每个考生都可能有自己不同风格、需求的夹带:)）；
+* 每一种材质的最近碰撞程式；
+* 每一种材质的任意碰撞程式；
+* 丢失程式；
+
+<<>>夹带（数据）是一种用户定义的数据结构用于关联到各个射线。比如，通常的用法是保存一个返回的颜色，射线的递归深度，阴影的衰减系数等。它可以看成是射线追踪结束后的返回数据。它也可以用于在递归期间在不同的射线生成程式中保存、发布数据。
+<<>>指派给材质的最近碰撞与任意碰撞程式好比传统渲染系统中的着色器：它们会在射线与几何图元发生相交时调用。因为这些程式指派给材质是区分射线类型的，所以并不是所有的射线类型都必须有这两种程式。参见4.5，4.6节以获取更多细节。
+<<>>丢失程式是在追踪的光线确定没有与任何集合体相撞的时候调用的。丢失程式可以用来返回一个常量以表示天空的颜色或者返回从环境贴图中采样的颜色。
+<<>>表格1 可以作为一个Whitted风格的递归射线追踪器的示例，目的是展示如何使用射线类型。
+
+表格1
+|Ray Type|Payload|Closest Hit|Any Hit|Miss|
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+|Radiance|RadiancePL|计算颜色、继续追踪递归深度|n/a|环境贴图查询|
+|Shadow|ShadowPL|n/a|计算阴影衰减，如果对象不透明则终止追踪|n/a|
+
+上表中的夹带数据结构可能会是这样的：
+
+{% highlight c++%}
+// Payload for ray type 0: radiance rays
+struct RadiancePL
+{
+float3 color;
+int recursion_depth;
+};
+// Payload for ray type 1: shadow rays
+struct ShadowPL
+{
+float attenuation;
+};
+{% endhighlight %}
+
+对rtContextLaunch的调用，射线生成程式发射radiance射线到场景中，将传递的结果（结果来自夹带数据中的颜色字段）写入输出缓冲区以便显示。
+
+{% highlight c++%}
+RadiancePL payload;
+payload.color = make_float3( 0.f, 0.f, 0.f );
+payload.recursion_depth = 0; // initialize recursion depth
+Ray ray = ... // some camera code creates the ray
+ray.ray_type = 0; // make this a radiance ray
+rtTrace( top_object, ray, payload );
+// Write result to output buffer
+writeOutput( payload.color );
+{% endhighlight %}
+
+图元与radiance射线相交后，会执行最近碰撞程式，用来计算射线的颜色，有时候需要发射阴影射线和反射射线。阴影射线的部分内容见下：
+
+{% highlight c++%}
+ShadowPL shadow_payload;
+shadow_payload.attenuation = 1.0f; // initialize to visible
+Ray shadow_ray = ... // create a ray to light source
+shadow_ray.ray_type = 1; // make this a shadow ray
+rtTrace( top_object, shadow_ray, shadow_payload );
+// Attenuate incoming light (‘light’ is some user-defined
+// variable describing the light source)
+float3 rad = light.radiance * shadow_payload.attenuation;
+// Add the contribution to the current radiance ray’s
+// payload (assumed to be declared as ‘payload’)
+payload.color += rad;
+{% endhighlight %}
+
+<<>>为了合理的衰减阴影射线，所有的材质使用任意碰撞程式来调整衰减度与终止射线的遍历。下面的代码将不透明的材质的衰减度设为0。
+
+{% highlight c++%}
+shadow_payload.attenuation = 0; // assume opaque material
+rtTerminateRay(); // it won’t get any darker, so terminate
+{% endhighlight %}
+
+### 3.1.3 全局状态
 
 
+{% highlight c++%}
+{% endhighlight %}
 
-
-
-
-
-
-
-
-
-
-
+{% highlight c++%}
+{% endhighlight %}
 
 
 
