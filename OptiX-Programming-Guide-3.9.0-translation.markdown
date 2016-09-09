@@ -218,10 +218,72 @@ rtTerminateRay(); // it won’t get any darker, so terminate
 {% endhighlight %}
 
 ### 3.1.3 全局状态
-
+<<>>除了射线类型与接入点之外，还有一些其他的全局设置封装在了OptiX的上下文中。每一个上下文持有一组属性，他们可以通过rtContext{Get|Set}Attribute函数设置。比如，OptiX上下文分配的内存数量可以通过传入RT_CONTEXT_ATTRIBUTE_SUED_HOST_MEMORY而查询到。
 
 {% highlight c++%}
+RTcontext context = ...;
+RTsize used_host_memory;
+rtContextGetAttribute( context, RT_CONTEXT_ATTRIBUTE_USED_HOST_MEMORY, sizeof(RTsize), &used_host_memory );
 {% endhighlight %}
+
+当前rtContextGetAttribute支持如下属性：
+* RT_CONTEXT_ATTRIBUTE_MAX_TEXTURE_COUNT
+* RT_CONTEXT_ATTRIBUTE_GPU_PAGING_FORCE_OFF
+* RT_CONTEXT_ATTRIBUTE_GPU_PAGING_ACTIVE
+* RT_CONTEXT_AVAILABLE_DEVICE_MEMORY
+* RT_CONTEXT_USED_HOST_MEMORY
+* RT_CONTEXT_CPU_NUM_THREADS
+
+可以通过RT_CONTEXT_CPU_NUM_THREADS设置CPU线程数量，用于多种任务比如构建加速结构体（以后简称加速体），通过RT_CONTEXT_ATTRIBUTE_GPU_PAGING_FORCE_OFF禁用大内存分页，其他的属性是只可读的。
+<<>>为了支持递归调用，OptiX使用一小块堆栈关联每一个线程的执行。rtContext{Get|Set}StackSize可以设置或者查询这块堆栈的大小。堆栈大小的设置一定要小心，过大的堆栈将会导致性能的降级而过小的堆栈将会导致堆栈溢出。堆栈溢出错误可以通过用户定义的异常程式经行处理。
+<<>>可以通过像C风格下的printf函数一样的rtContextSetPrint\*函数集开启OptiX程式的打印功能，允许这些程式更加容易被调试。CUDA C函数rtContextSetPrintEnabled可以开启或者关闭打印全部（程式），而rtContextSetPrintLaunchIndex可以针对具体的计算网格进行打印。全局打印状态被关闭的时候，打印语句不会对性能有一点损害，默认状态是关闭的。
+<<>>打印请求会被缓存在一个内部缓冲区中，缓冲区的大小可以通过rtContextSetPrintBufferSize设置。该缓冲区的溢出会导致输出流的截断（译注：应该不会报告溢出错误，而是直接抛弃最早的记录）。输出流是在所有的计算进行结束而rtContextLaunch函数返回之前打印到标准输出的。
+
+{% highlight c++%}
+RTcontext context = ...;
+rtContextSetPrintEnabled( context, 1 );
+rtContextSetPrintBufferSize( context, 4096 );
+{% endhighlight %}
+
+在OptiX程式中，rtPrintf函数像C语言下的printf一样工作。对rtPrintf的调用会自动将（数据）保存进输出缓冲区中。**但是同一个线程的分次调用或者不同线程的调用其输出会是相互交错的。（译注：多线程的输出交错能理解，单线程的多次调用怎么还会任意交错输出？）**
+
+{% highlight c++%}
+rtDeclareVariable(uint2, launch_idx ,rtLaunchIndex,
+);
+RT_PROGRAM void any_hit()
+{
+rtPrintf( "Hello from index %u, %u!\n",
+launch_idx.x, launch_idx.y );
+}
+{% endhighlight %}
+
+<<>>上下文也是OptiX最外层的变量作用域。通过rtContextDeclareVariable申明的变量是关联到给定上下文的所有对象上的。为了避免命名冲突，存在的变量可以通过rtContextQueryVariable（传变量名）或者rtContextGetVariable（传索引）查询，通过rtContextRemoveVariable删除。
+<<>>可以在装配过程的任意时刻调用rtContextValidate来检测上下文状态与关联对象的有效性与合法性。也会一起检测已存在的必要程式（比如一个相交程式）的内部状态与关联的外部变量的合法性。合法性检测总会在上下文执行的时候隐性的被调用。
+<<>>执行rtContextCompile会明确的请求计算内核与关联的上下文对象的编译。当场景参数或者程式变化后并不需要严格的调用rtContextCompile，因为在下次调用rtContextLaunch的时候会触发编译。rtContextCompile允许用户控制编译的时间，但是尽量在编译之前设置完毕所有的上下文内容，因为后续的改动会导致rtContextLaunch在调用时重新编译。
+<<>>（译注：待译，原文：rtContextSetTimeoutCallback specifies a callback function of type RTtimeoutcallback that is called at a specified maximum frequency from OptiX API calls that can run long, such as acceleration structure builds, compilation, and kernel launches. ）这就允许应用程序更新它的接口或者执行其他任务。回调函数也可以要求OptiX停止当前的工作并将控制权返回给应用程序，这个请求是被立即执行的。（待译，原文： Output buffers expected to be written to by an rtContextLaunch are left in an undefined state, but otherwise OptiX tracks what tasks still need to be performed and resumes cleanly in subsequent API calls.） 
+
+{% highlight c++%}
+// Return 1 to ask for abort, 0 to continue.
+// An RTtimeoutcallback.
+int CBFunc()
+{
+update_gui();
+return bored_yet();
+}
+…
+// Call CBFunc at most once every 100 ms.
+rtContextSetTimeoutCallback( context, CBFunc, 0.1 );
+{% endhighlight %}
+
+<<>>rtContextGetErrorString函数可以返回任何出现在上下文设置、合法性检测或者发射（发射射线）执行的失败描述。
+
+## 3.2 缓冲区
+
+
+
+
+
+
 
 {% highlight c++%}
 {% endhighlight %}
