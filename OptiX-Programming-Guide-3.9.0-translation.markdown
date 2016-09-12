@@ -278,6 +278,251 @@ rtContextSetTimeoutCallback( context, CBFunc, 0.1 );
 <<>>rtContextGetErrorString函数可以返回任何出现在上下文设置、合法性检测或者发射（发射射线）执行的失败描述。
 
 ## 3.2 缓冲区
+<<>>OptiX利用缓冲区向C端与G端传递数据。缓冲区要在rtContextLaunch使用之前利用函数rtBufferCreate创建，这个函数可以为缓冲区设置类型与可选的标记（flags），他们是通过位运算或组合起来的。缓冲区的类型定义了数据流的走向。类型是个枚举值，定义在了RTbuffertype里面：
+
+* RT_BUFFER_INPUT：只有C端可以写数据。数据从C端传送到G端，G端只可读；
+* RT_BUFFER_OUTPUT：RT_BUFFER_INPUT的相反类型；
+* RT_BUFFER_INPUT_OUTPUT：允许C、G两端都读与写；
+* RT_BUFFER_PROGRESSIVE_STREAM：自动更新的发射输出流。可以在网络连接中有效流输出。
+
+缓冲区的标志描述了它的特征，也是枚举类型见下：
+
+* RT_BUFFER_GPU_LOCAL：（待译）；
+* RT_BUFFER_LAYERED：当缓冲区是用来作为纹理缓冲区时，它的深度信息表示层的数量而非3D缓冲区中的深度；
+* RT_BUFFER_CUBEMAP：深度作为立方体的面来使用，而不是3D缓冲区中的深度；
+
+<<>>在使用一个缓冲区之前，它的大小、纬度、数据的格式必须先被指定。数据格式可以通过函数rtBuffer{Get|Set|}Fomart设置，格式是RTformat枚举类型的，是为C、CUDA C的数据类型而设计的，比如unsigned int 、float3等。可以使用RT_FORMAT_USER来指定任意类型的数据。通过rtBufferSetElementSize函数指定元素的大小。通过rtBufferSetSize{1,2,3}D来指定缓冲区的大小，同样他们也指定了缓冲区的纬度。通过调用rtBufferGetMipLevelSize{1,2,3}D函数并且传入mip层，可以获取到纹理缓冲区中mip层的大小。
+
+{% highlight c++%}
+RTcontext context = ...;
+RTbuffer buffer;
+typedef struct { float r; float g; float b; } rgb;
+rtBufferCreate( context, RT_BUFFER_INPUT_OUTPUT, &buffer );
+rtBufferSetFormat( RT_FORMAT_USER );
+rtBufferSetElementSize( sizeof(rgb) );
+rtBufferSetSize2D( buffer, 512, 512 );
+{% endhighlight %}
+
+<<>>C端获取到缓冲区中的数据是要通过rtBufferMap函数，这个函数返回一个一维的数组指针。所有的缓冲区必须通过rtBufferUnmap取消映射（unmap），这样上下文的验证才能成功。
+
+{% highlight c++%}
+// Using the buffer created above unsigned int width, height;
+rtBufferGetSize2D( buffer, &width, &height );
+void* data;
+rtBufferMap( buffer, &data );
+rgb* rgb_dat = (rgb*)data;
+for( unsigned int i = 0; i < width*height; ++i ) {
+	rgb_dat[i].r = rgb_dat[i].g = rgb_dat[i].b =0.0f;
+}
+rtBufferUnmap( buffer );
+{% endhighlight %}
+
+rtBufferMapEx与rtBufferUnmapEx设置mipmap的纹理如下：
+
+{% highlight c++%}
+// Using the buffer created above
+unsigned int width, height;
+rtBufferGetMipLevelSize2D( buffer, &width, &height, level+1 );
+rgb *dL, *dNextL;
+rtBufferMapEx( buffer, RT_BUFFER_MAP_READ_WRITE, level, 0, &dL );
+rtBufferMapEx( buffer, RT_BUFFER_MAP_READ_WRITE, level+1, 0, &dNextL );
+unsigned int width2 = width*2;
+for( unsigned int y = 0; y < height; ++y ) {
+	for( unsigned int x = 0; x < width; ++x ) {
+		dNextL[x+width*y] = 0.25f *
+		(dL[x*2+width2*y*2] +
+		dL[x*2+1+width2*y*2] +
+		dL[x*2+width2*(y*2+1)] +
+		dL[x*2+1+width2*(y*2+1)]);
+	}
+}
+rtBufferUnmapEx( buffer, level );
+rtBufferUnmapEx( buffer, level+1 );
+{% endhighlight %}
+
+在OptiX程式中访问缓冲区需要一个简单的数组语法。下面模板的2个形参申明了元素类型一维度。
+
+{% highlight c++%}
+rtBuffer<rgb,2> buffer;
+...
+uint2 index=...;
+floa r=buffer[index].r;
+{% endhighlight %}
+
+### 3.2.1 缓冲区与缓冲区ID
+<<>>从OptiX3.5开始，缓冲区包含了缓冲区ID。在C端将输入缓冲区的格式申明为RT_FORMAT_BUFFER_ID的话，缓冲区就会填充缓冲区的ID（ID是通过rtBufferGetId或者optix::Buffer::getId获得）。一个特殊的id值为RT_BUFFER_ID_NULL，利用它可以判断哪些buffer是合理哪些不是。RT_BUFFER_ID_NULL永远不会以有效的缓冲区ID返回。下面的示例创建了2个输入缓冲区，第一个保存数据，第二个保存ID。
+
+{% highlight c++%}
+Buffer inputBuffer0 = context->createBuffer( RT_BUFFER_INPUT, RT_FORMAT_INT, 3 );
+Buffer inputBuffers = context->createBuffer( RT_BUFFER_INPUT, RT_FORMAT_BUFFER_ID, 1);
+int* buffers = static_cast<int*>(inputBuffers- >map());
+buffers[0] = inputBuffer0->getId();
+inputBuffers->unmap();
+{% endhighlight %}
+
+<<>>>在G端来的话，ID缓冲区使用模板形参为rtBufferId的参数进行申明。在缓冲区中的保存的标识符被隐式的转化为缓冲期句柄。下面的示例创建了一个一维缓冲区，它的元素就是它们自己————一个一维的存储了整型变量的缓冲区。（译注：bufferId与buffer在本质上相同的，参见OptiX_API_Reference_3.0.0.pdf P.98）
+
+{% highlight c++%}
+rtBuffer<rtBufferId<int,1>,1> input_buffers;
+{% endhighlight %}
+
+获取缓冲区id的方式与正常缓冲区一样：
+
+{% highlight c++%}
+// Grab the first element of the first buffer in 'input_buffers'
+int value=intpu_buffer[buf_index][0];
+{% endhighlight %}
+
+也可以查询缓冲区的大小，以遍历内容：
+
+{% highlight c++%}
+for (size_t i=0;k<input_buffers.size();++i)
+	result+=input_buffers[i];
+{% endhighlight %}
+
+缓冲区可以任意的嵌套，就是每一层嵌套被访问时会有额外内存开销。多个缓冲区的查找可以通过使用引用或者rtBufferId的副本来避免。
+
+{% highlight c++%}
+rtBuffer<rtBufferId<rtBufferId<int,1>,1>,1> input_buffers3;
+...
+rtBufferId<int,1>& buffer=input_buffers3[buf_index1][buf_index2];
+size_t size =buffer.size();
+for(size_t i=0;i<size;++i)
+	value+=buffer[i];
+{% endhighlight %}
+
+<<>>当前只有非互相操作（non-interop）而且类型为RT_BUFFER_INPUT的缓冲区才能容纳缓冲区ID，并且这些ID对应的缓冲区必须在元素与维度上一致，大小可以不一样。可以通过rtCOntextGetBufferFromId函数获取与缓冲区ID关联的RTbuffer对象，也可以通过C++接口optix::Context::getBufferFromId获取。
+<<>>除了将缓冲区ID保存在缓冲区中以外，你可以将它们保存在任意的结构体或者RTvariables中，也可以作为夹带数据的元素或者作为参数传递给可调用程序（callable programs）。一个rtBufferId对象可以使用缓冲区ID进行构建。
+
+{% highlight c++%}
+rtDeclareVariable(int, id,,);
+rtDeclareVariable(int, index,,);
+...
+//译注：将id强转为rtBufferId<int,1>，然后取索引为index的值；
+int value = rtBufferId<int,1>(id)[index];
+{% endhighlight %}
+
+一个传递给可调用程序的示例如下：
+
+{% highlight c++%}
+#include <optix_world.h>
+using namespace optix;
+
+struct BufInfo {
+	int index;
+	rtBufferId<int, 1> data;
+};
+rtCallableProgram(int, getValue, (BufInfo));
+//译注：pdf下面getVal打错，应该为getValue，see P.21
+RT_CALLABLE_PROGRAM int getVal( BufInfo bufInfo ) {
+	return bufInfo.data[bufInfo.index];
+}
+
+rtBuffer<int,1> result;
+rtDeclareVariable(BufInfo, buf_info, ,);
+RT_PROGRAM void bindlessCall() {
+	int value = getValue(buf_info);
+	result[0] = value;
+}
+{% endhighlight %}
+
+<<>>注意到rtCallableProgram与rtDeclareVariable（译注：原文有误：rtCallProgram）都是宏，因此应该使用类型定义、结构体代替模板类型，以便绕过C的预处理限制。
+
+{% highlight c++%}
+typedef rtBufferId<int,1> RTB;
+rtDeclareVariable(RTB,buf,,);
+{% endhighlight %}
+
+<<>>在optixpp_namespace.h文件中有一个对G端rtBufferId的镜像定义，可以使用它来定义在两端都能使用了代码。下面是个使用BufInfo结构体的C端代码：
+
+{% highlight c++%}
+BufInfo buf_info;
+buf_info.index = 0;
+buf_info.data = rtBufferId<int,1>(inputBuf0-> getId() );
+context["buf_info"]->setUserData(sizeof(buf_info), &buf_info);
+{% endhighlight %}
+
+## 纹理
+
+
+### 4.8.2 报告相交
+<<>>射线在遍历的过程中，当其与几何体的图元相交的时候就需要调用相交程式（译注：这里应该是射线与几何体的包围盒相交的时候就会调用相交程式）。相交程式的职责就是计算射线与图元是否真实相交，并且向后续调用提供相交的t值（t-value)。另外，相交程式也有责任计算相交处的一些细节，比如表面法线，并通过属性变量（attribute variables）提供给后续调用。
+<<>>一旦相交程式找到了t值，它必须通过调用OptiX的两个函数从而向后续步骤报告，函数是：rtProtectialIntersection与rtReportIntersection
+
+{% highlight c++%}
+__device__ bool rtPotentialIntersection(float t);
+__device__ bool rtReportIntersection(unsigned int material);
+{% endhighlight %}
+
+rtPotentialIntersection需要相交的t值作为参数。如果在当前的遍历中t值能够成为潜在的最近碰撞点的话，函数就会缩小t区间（t-interval）并且返回true。如果t值在区间外函数就会返回false，随后相交程式就会结束（译注：官方在这里的表达过于具体化，调用了rtPotentialIntersection后返回false，用户在程序里面不返回继续做些其他什么逻辑也是可以的）。
+<<>>如果rtPotentialIntersection返回了true，相交程式就可以设置属性变量（attribute variables）的值并且调用rtReportIntersection函数。rtReportIntersection函数需要给传入一个代表材质索引的unsigned int值（材质必须与最近碰撞与任意碰撞程式关联）。材质索引可以用来支持单个几何体的不同材质需求。管线马上调用对应的任意碰撞程式。如果任意碰撞程式视本次碰撞为无效可调用rtIgnoreIntersection函数，如此一来rtReportIntercetion就会返回false，相反的话就是true。
+<<>>属性变量值的修改必须在rtPotentialIntersection与rtReportIntersection函数调用之间。在之外对属性变量的修改被视为无定义的（译注：但不报错）。通过这种方式修改的属性变量，其值可以在任意与最近碰撞程式中用到。
+<<>>如果任意碰撞程式调用了rtIgnoreIntersection函数，那么任何属性变量的值（包括t值）将会被还原成此前的值，如果当前射线与图元没有相交，相交程式只需要返回即可。
+
+### 4.8.3 包围盒的说明
+<<>>加速体使用包围盒来包围场景中的图元以便加速射线遍历的性能。包围盒程式的主要职责是描述给定图元（第一个参数）的aabb的最小三维尺度，并将该尺寸保存在第二个参数里面。包围盒总是在对象空间下计算的，所以用户不应该对其有变换的操作。
+为了得到正确的结果，包围盒必须仅仅包含图元。为了最好的性能，包围盒应该尽可能的紧凑。
+
+### 4.8.4 相交程式与包围盒程式示例
+<<>>下面的代码展示了如何将相交程式与包围盒程式联合起来描述几何图元。球体是一个简单的图形，它有着大家非常熟悉的相交算法。在下面的示例中，float4 变量sphere代表了中心与半径。
+
+{% highlight c++%}
+rtDeclareVariable( float4, sphere, , );
+rtDeclareVariable( optix::Ray, ray, rtCurrentRay, );
+rtDeclareVariable( float3, normal, attribute normal);
+
+RT_PROGRAM void intersect_sphere( int prim_index ) {
+	float3 center = make_float3( sphere.x, sphere.y, sphere.z );
+	float radius = sphere.w;
+	float3 O = ray.origin - center;
+	float b = dot( O, ray.direction );
+	float c = dot( O, O ) - radius*radius;
+	float disc = b*b - c;
+	if( disc > 0.0f ) {
+		float sdisc = sqrtf( disc );
+		float root1 = (-b - sdisc);
+		bool check_second = true;
+		if( rtPotentialIntersection( root1 ) ) {
+			normal = (O + root1*D) / radius;
+			if( rtReportIntersection( 0 ) )
+			check_second = false;
+		}
+		if( check_second ) {
+			float root2 = (-b + sdisc);
+			if( rtPotentialIntersection( root2 ) ) {
+				normal = (O + root2*D) / radius;
+				rtReportIntersection( 0 );
+			}
+		}
+	}
+}
+{% endhighlight %}
+
+注意到我们在这段相交程式里面忽略了prim_index参数，它代表该几何体只有一个图元；并且将材质索引0传给了rtReportIntersection函数（译注：它代表几何实例的0号材质）。包围盒程式非常简单：
+
+{% highlight c++%}
+RT_PROGRAM void bound_sphere( int, float result[6] ) {
+	float3 cen = make_float3( sphere.x, sphere.y, sphere.z );
+	float3 rad = make_float3( sphere.w, sphere.w, sphere.w );
+	// compute the minimal and maximal corners of
+	// the axis-aligned bounding box
+	float3 min = cen - rad;
+	float3 max = cen + rad;
+	// store results in order
+	result[0] = min.x;
+	result[1] = min.y;
+	result[2] = min.z;
+	result[3] = max.x;
+	result[4] = max.y;
+	result[5] = max.z;
+}
+{% endhighlight %}
+
+## 4.9 选择程式
+
+
+
+
 
 
 
@@ -287,8 +532,5 @@ rtContextSetTimeoutCallback( context, CBFunc, 0.1 );
 
 {% highlight c++%}
 {% endhighlight %}
-
-
-
 
 
