@@ -442,7 +442,177 @@ buf_info.data = rtBufferId<int,1>(inputBuf0-> getId() );
 context["buf_info"]->setUserData(sizeof(buf_info), &buf_info);
 {% endhighlight %}
 
-## 纹理
+## 3.3 纹理
+<<>>OptiX的纹理支持普通的纹理映射功能，包括过滤，各种缠绕（wrap）方式，纹理采样。rtTextureSamplerCreate用来创建纹理对象。每一个纹理对象关联到一个或者几个存有纹理数据的缓冲区。缓冲区可以是1D、2D或者3D的，可以通过rtTextureSamplerSetBuffer函数设置。函数rtTextureSamplerSetFilteringModes可以用来设置放大缩小，mipmap的过滤方式。缠绕方式通过函数rtTextureSamplerSetWrapMode设置。给定纹理的最大各向异性通过函数rtTextureSamplerSetMaxAnisotropy函数进行，大于0的值会在该值的特定情况下开启各向异性。rtTextureSamplerSetReadMode函数可以用来将读取的纹理结果自动转换成单位化了的浮点值。
+
+{% highlight c++%}
+RTcontext context = ...;
+RTbuffer tex_buffer = ...; // 2D buffer
+RTtexturesampler tex_sampler;
+rtTextureSamplerCreate( context, &tex_sampler );
+rtTextureSamplerSetWrapMode( tex_sampler, 0, RT_WRAP_CLAMP_TO_EDGE);
+rtTextureSamplerSetWrapMode( tex_sampler, 1, RT_WRAP_CLAMP_TO_EDGE);
+rtTextureSamplerSetFilteringModes( tex_sampler,
+	RT_FILTER_LINEAR,
+	RT_FILTER_LINEAR,
+	RT_FILTER_NONE );
+rtTextureSamplerSetIndexingMode( tex_sampler, RT_TEXTURE_INDEX_NORMALIZED_COORDINATES );
+rtTextureSamplerSetReadMode( tex_sampler, RT_TEXTURE_READ_NORMALIZED_FLOAT );
+rtTextureSamplerSetMaxAnisotropy( tex_sampler, 1.0f );
+rtTextureSamplerSetBuffer( tex_sampler, 0, 0, tex_buffer );
+{% endhighlight %}
+
+<<>>OptiX的3.9版本支持立方体、层级和mipmap纹理，分别通过rtBufferMapEx，rtBufferUnmapEx，rtBufferSetMipLevelCount设置。层级纹理与CUDA等级纹理、OpenGL的纹理数组是相同的。通过rtBufferCreate函数传递RT_BUFFER_LAYERED参数创建层级纹理。传递RT_BUFFER_CUBEMAP创建立方体纹理。这2种方式下的缓冲区深度分别表示层的数量与立方体的面数，并不是3D缓冲区的深度概念。OptiX程式可以通过CUDA C的内建函数tex1D、tex2D、tex3D获取纹理的数据。
+
+{% highlight c++%}
+rtTextureSampler<uchar4, 2, cudaReadModeNormalizedFloat> t;
+...
+float2 tex_coord = ...;
+float4 value = tex2D( t, tex_coord.x, tex_coord.y );
+{% endhighlight %}
+
+OptiX3.0版本支持‘非绑定’纹理（bindless）。非绑定纹理允许OptiX程式直接引用纹理而不通过变量绑定，这是通过纹理ID来实现的。使用非绑定纹理可以动态的在多纹理之间切换而不需要明确的申明变量，也不需要手工实现切换代码。要切换的纹理可以拥有不同的属性，比如缠绕方式、纹理尺寸等，提供了比纹理数组更多的灵活性。为了从已存在纹理采样器中获取设备句柄，可以使用rtTextureSamplerGetId函数：
+
+{% highlight c++%}
+RTtexturesampler tex_sampler = ...;
+int tex_id;
+rtTextureSamplerGetId( tex_sampler, &tex_id );
+{% endhighlight %}
+
+<<>>一个纹理ID的值是不可变且有效的，除非销毁关联它的纹理采样器。让纹理ID在OptiX程式中可用，可以通过输入缓冲区或者OptiX的变量：
+
+{% highlight c++%}
+RTbuffer tex_id_buffer = ...; // 1D buffer
+unsigned int index = ...;
+void* tex_id_data;
+rtBufferMap( tex_id_buffer, &tex_id_data );
+((int*)tex_id_data)[index] = tex_id;
+rtBufferUnmap( tex_id_buffer );
+{% endhighlight %}
+
+与CUDA C的纹理函数一样，OptiX程式可以通过rtTex1D<>，rtTex2D<>，rtTex3D<>函数访问非绑定纹理：
+
+{% highlight c++%}
+rtBuffer<int, 1> tex_id_buffer;
+unsigned int index = ...;
+int tex_id = tex_id_buffer[index];
+float2 tex_coord = ...;
+float4 value = rtTex2D<float4>( tex_id, tex_coord.x, tex_coord.y );
+{% endhighlight %}
+
+纹理也可以通过向其提供mipmap的LoD或各向异性过滤的渐变来进行采样。
+
+{% highlight c++%}
+float4 v;
+if( mip_mode == MIP_DISABLE )
+v = rtTex2DLayeredLod<float4>( tex, uv.x, uv.y, tex_layer );
+else if( mip_mode == MIP_LEVEL )
+v = rtTex2DLayeredLod<float4>( tex, uv.x, uv.y, tex_layer, lod );
+else if( mip_mode == MIP_GRAD )
+v = rtTex2DLayeredGrad<float4>( tex, uv.x, uv.y, tex_layer, dpdx, dpdy );
+{% endhighlight %}
+
+## 3.4 节点图（Graph Nodes）
+<<>>当射线在程式中通过函数rtTrace发射的时候，需要给传递一个根节点代表节点图。C端应用通过组合OptiX API提供的节点类型创建这种图。这种图的基本结构是一个层级结构，底部是描述几何对象的节点，顶部是收集对象的节点。
+<<>>这种图的结构并不是传统场景中的场景图（scene graph），相反，它提供了一种方式来将程式或者动作（action）绑定当场景中的一组对象上。由于trTrace的调用需要一个根节点，那么不同的树或者子树都可以被传入（译注：这就表示一组对象）。比如，具有阴影的对象或者可以反射光线的对象可能使用不同的表现————要么为了性能，要么为了艺术效果。
+<<>>节点图中的节点通过调用rt\*Create函数创建（需要传入上下文作为一个参数）。由于这些节点对象是属于上下文的而非他们的父节点，所以调用rt\*Destroy函数可以删除这个对象变量，但是不会做任何引用计数或者自动释放它的子节点。
+<<>>图1 展示了一个节点图可能的样子，接下来的小节会表述各个不同的节点类型。
+<<P24>>
+<<>>表2 说明了那些节点可以作为其他节点的子节点，包括与加速提节点的关联。
+
+|Node type| Children nodes allowed|
+|:---:|:---:|
+|Geometry|-none-|
+|Material|-none-|
+|GeometryInstance|Geometry,Material|
+|GeometryGroup|GeometryInstance,Acceleration|
+|Group|GeometryGroup,Group,Seletor,Transform,Acceleration|
+|Transform|GeometryGroup,Group,Selector,Transform|
+|Selector|GeometryGroup,Group,Selector,Transform|
+|Acceleration|-none-|
+
+### 3.4.1 几何体
+<<>>几何体节点是表述几何体对象（一个集合了用户定义的图元，用来与射线相交）的基础节点。几何体节点所包含的图元数量通过rtGeometrySetPrimitiveCount函数设置，为了定义图元，就需要通过函数rtGeometrySetIntersectionProgram指派给几何体相交程式（译注：图元的定义完全在于C端，OptiX完全不知道也没有枚举值定义各种图元的类型，所以与用户定义的图元是否相交完全在于用户定义的相交程式，所以这就是原文中图元的定义是通过相交程式给出的含义）。输入的参数一个是图元的索引（index），一个是射线，相交程式的工作就是去判断它两之间的相交情况。结合程式的变量这就提供了一种必要的机制去定义任意图元类型与射线相交。一个常用的示例是个三角网格，相交程式从传入的顶点数据缓冲区中读取必要的三角面数据然后进行射线-三角形相交。
+<<>>为了给任意几何体构建加速体，让OptiX去查询每一个图元的边界（bounds）是必要的。出于这样的考虑，一个边界程式（bounds program）必须通过rtGeometrySetBoundingBoxProgram函数提供给几何体（译注：就是前文翻译的包围盒程式）。这个程式简单的计算出需求的图元的包围盒（译注：该程式在被OptiX调用的时候会传入2个参数，一个是图元在几何体中的索引，一个是存储该图元包围盒大小的指针。详细讨论见：sfsfsfs），然后OptiX用它作为基础来构架加速体。
+<<>>几何节点可以完全是动态的，比如图元的数量或者在调用rtContextLaunch函数之间绑定到相交、包围盒程式中的变量值都是可变的。当这样的情况发生之后，包含那个修改了的几何体的加速体必须被告知（几何体变化了），这样的告知是通过函数rtGeometryMakDirty函数进行的。针对加速体重构建的更多信息参考章节3.5。
+<<>>下面的示例展示了如何构建一个用球体作为单一图元的几何对象。相交与包围盒程式利用单个参数作为球体的半径。
+
+{% highlight c++%}
+RTgeometry geometry;
+RTvariable variable;
+// Set up geometry object.
+rtGeometryCreate( context, &geometry );
+rtGeometrySetPrimitiveCount( geometry, 1 );
+rtGeometrySetIntersectionProgram( geometry, sphere_intersection);
+rtGeometrySetBoundingBoxProgram( geometry, sphere_bounds );
+// Declare and set the radius variable.
+rtGeometryDeclareVariable( geometry, "radius", &variable );
+rtVariableSet1f( variable, 10.0f );
+{% endhighlight %}
+
+## 3.4.2 材质
+<<>>材质封装了行为，它会在射线与某个图元相交后被调用（材质必须先前关联该几何体）。这样的行为包括：计算反射颜色，发射额外的射线，忽视相交，终止射线等。通过申明程式变量可以为材质提供任意的参数。
+<<>>两种类型的程式需要被指派给材质：最近碰撞程式与任意碰撞程式。这两种类型的不同之处是何时、什么频率被执行。最近碰撞程式与传统渲染系统相似，是为射线与场景中最近相交处调用最多一次（每条射线）。它典型的会去执行纹理查询、计算反射颜色、光源采样、递归射线追踪等动作，最后把结果保存在射线的夹带数据结构中。
+<<>>任意碰撞程式是在遍历过程中每一个潜在最近相交的情况下调用的（译注：OptiX官方Demo中的cu程序一般都是将rtReportIntesection写在rtPotentialIntersection的true结果内，所以才会有前面这句话，其实哪怕不是潜在最近相交，我们也可以直接调用rtReportIntersection来触发任意碰撞程式的调用）。相交后对该类型程式的调用可能与射线碰撞图元的（视觉）先后顺序不一样，实际上射线与场景中图元的相交次数如果需求的话可以被枚举出来（靠每次相交后调用rtIgnoreIntersection函数）（译注：编程指南这里说的没问题，但对于初学OptiX的新手难免有点疑惑，OptiX内核有个机制就是如果在相交后调用了rtIgnoreIntersection函数，就会还原t区间，这样就不会丢弃对区间以外几何体的相交了）。使用任意碰撞程式的典型用法就是在阴影射线中尽早终止遍历（使用rtTerminateRay）或者binary transparency（译注：咋翻译？）。比如是否忽略相交是基于纹理查询的结果。
+<<>>要说明的一个重点是：两种类型的程式是以射线类型指派给材质的，这就意味着每种材质可以持有多于1种的最近或者任意碰撞程式。应用程序能够区别具体类型的射线是什么行为是有用的，比如将阴影射线的类型分离出来，有助于仅仅用来判断场景中两点之间的可见性。这种情况的话，一个简单的任意碰撞程式（指定为只接收阴影射线类型）可以立即结束射线的遍历，而最近碰撞程式完全不会有触发（译注：因为最近碰撞程式接受的射线类型不是阴影射线定义的类型）。这个概念允许对每种类型的射线进行高效的特殊化编程。
+
+### 3.4.3 几何实例
+<<>>一个几何实例代表了一个几何体与一组材质。关联的几何体通过rtGeometryInstanceSetGeometry设置，关联的材质的数量通过rtGeometryInstanceSetMaterialCount函数设置。而关联的材质数量由材质的最大索引决定，这个索引是用来在相交程式中被报告时使用的（译注：就是调用rtReportIntersection函数的时候传递的参数，就是索引编号）。注意，多个几何实例可以引用一个几何体，允许几何体有不同的材质。同样，材质也可以在不同的几何实例之间重用。
+<<>>这是示例配置了一个几何实例，它的第一个材质索引为mat_phong，第二个为mat_diffuse，两个都是rtMaterial对象并且指派了恰当的程式。几何实例引用了triangle_mesh这么一个rtGeometry对象。
+
+{% highlight c++%}
+RTgeometryinstance ginst;
+rtGeometryInstanceCreate( context, &ginst );
+rtGeometryInstanceSetGeometry( ginst, triangle_mesh);
+rtGeometryInstanceSetMaterialCount( ginst, 2 );
+rtGeometryInstanceSetMaterial( ginst, 0, mat_phong);
+rtGeometryInstanceSetMaterial( ginst, 1, mat_diffuse);
+{% endhighlight %}
+
+### 3.4.4 几何组
+<<>>几何组就是个可以存放任意数量几何实例的容器。存放的数量通过rtGeometryGroupSetChildCount设定，几何实例通过函数rtGeometryGroupSetChild指定。每一个几何组必须通过rtGeometryGroupSetAcceleration函数指定一个加速体（见3.5节）。最单间的使用方式就是指派一个几何实例：
+
+{% highlight c++%}
+RTgeometrygroup geomgroup;
+rtGeometryGroupCreate( context, &geomgroup );
+rtGeometryGroupSetChildCount( geomgroup, 1 );
+rtGeometryGroupSetChild( geomgroup, 0, geometry_instance );
+{% endhighlight %}
+
+<<>>多个几何组之间可以共享孩子，这就意味着几何实例可以是好几个几何组的孩子。
+
+### 3.4.5 组
+<<>>组在节点图中代表一个集合其他对象的更高级节点。它们用来编译节点图结构，然后传递给rtTrace进行射线相交。
+<<>>一个组可以容纳任意数量的子节点，这些子节点必须是rtGroup、rtGeometryGroup、trTransform与rtSelector对象。通过rtGroupSetChildCount函数指定子节点数量，通过rtGroupSetChild指派具体的子节点对象。每一个组必须通过rtGroupSetAcceleration函数指派一个加速体。
+<<>>组的常规用法就是集合几个互相之间独立动态运动的几何组。位置、旋转以及缩放参数可以通过变换节点进行展现，所以在rtContextLaunch函数之间（译注：每次渲染就要调用这个函数）进行重构建的唯一加速节点就是顶层节点。这通常比更新整个场景的加速体要块的多。
+<<>>注意到组中的子节点可以被其他组共享，那么没有子节点有可能也是另一个组的子节点。这允许非常灵活且轻量级实例的场景（的展示）。尤其是结合了共享加速体（见3.5节）。
+
+### 3.4.6 变换
+<<>>变换节点用来对其下子节点进行投影变换后的呈现。变换节点必须指派一个如下节点：rtGroup、rtGeometryGroup、trTransform、或者rtSelector。这就是说在变换节点下的节点要么就是几何组中普通的几何体，要么就是一整个场景中全新的子节点图。
+<<>>变换其实就是通过rtTransormSetMatrix传递了一个4X4浮点矩阵（16个元素的一维数组）。它可以看成是这个矩阵变换了其下几何体。然而，这种变换的效果是通过变换射线而得到的。这就意味着变换没有让OptiX重构建任何加速体。
+<<>>这个示例展示了一个只有平移变换的变换对象是如何创建的：
+
+{% highlight c++%}
+RTtransform transform;
+const float x=10.0f, y=20.0f, z=30.0f;
+// Matrices are row-major.
+const float m[16] = 
+	{ 1, 0, 0, x,
+		0, 1, 0, y,
+		0, 0, 1, z,
+		0, 0, 0, 1 };
+rtTransformCreate( context, &transform );
+rtTransformSetMatrix( transform, 0, m, 0 );
+{% endhighlight %}
+
+### 3.4.7 选择器
+<<>>选择器与组（节点）相似就是一个更高级别的节点图中的节点。其中的子节点数量通过rtSelectorSetChildCound设置，具体的子节点通过rtSelectorSetChild设置。有效的子节点类型为：rtGroup、rtGeometryGroup、trTransform、或者rtSelector。
+<<>>选择器（节点）与组（节点）的主要区别在于选择器没有加速体。取而代之的是访问程式的绑定，通过rtSelectorSetVisitProgram绑定。这个程式是在射线遍历过程中每次遇到选择器节点后调用。程式说明了哪些子节点（选择器下的子节点）能够被射线继续遍历，调用rtInstersectChild函数后即表示该子节点需要被继续遍历。
+<<>>选择器的典型用法就是动态的调节层次细节（Lod）：场景中的对象可能以多种几何节点形式存在，每一个包含了不同的Lod。包含这些层次细节的几何体的几何组们（译注：注意这里是几何组们，每一个几何组包含所有几何体的一种Lod）可以指派给一个选择器。访问程式根据标准（比如基于足印或者当前射线的长度为标准）选择哪个子节点（译注：就是哪个几何组）可以相交，剩下的就可以忽略掉。
+<<>>选择器的子节点可以和其他场景图中的节点共享，以允许灵活实现。
+
+## 3.5 射线追踪中的加速结构体
+
 
 
 ### 4.8.2 报告相交
