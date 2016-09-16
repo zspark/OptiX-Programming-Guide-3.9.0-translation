@@ -570,7 +570,7 @@ rtGeometryInstanceSetMaterial( ginst, 1, mat_diffuse);
 {% endhighlight %}
 
 ### 3.4.4 几何组
-<<>>几何组就是个可以存放任意数量几何实例的容器。存放的数量通过rtGeometryGroupSetChildCount设定，几何实例通过函数rtGeometryGroupSetChild指定。每一个几何组必须通过rtGeometryGroupSetAcceleration函数指定一个加速体（见3.5节）。最单间的使用方式就是指派一个几何实例：
+<<>>几何组就是个可以存放任意数量几何实例的容器。存放的数量通过rtGeometryGroupSetChildCount设定，几何实例通过函数rtGeometryGroupSetChild指定。每一个几何组必须通过rtGeometryGroupSetAcceleration函数指定一个加速体（见3.5节）。最简单的使用方式就是指派一个几何实例：
 
 {% highlight c++%}
 RTgeometrygroup geomgroup;
@@ -612,10 +612,203 @@ rtTransformSetMatrix( transform, 0, m, 0 );
 <<>>选择器的子节点可以和其他场景图中的节点共享，以允许灵活实现。
 
 ## 3.5 射线追踪中的加速结构体
+<<>>加速体在加速遍历与相交查询中是个重要的工具，尤其是对数据量大的场景。成功的加速体代表场景中几何体被瓦解之后的层级结构，这个层级结构之后被用来在射线相交时候快速排除空间区域。
+<<>>有好多种不同类型的加速体，每一种都有他的优点与短板。不同的场景需要不同类型的加速体以达到性能优化的目的（比如静态与动态场景，普通的图元与三角形图元等）。通常的取舍就是构建速度与射线追踪的性能，极限的解决方案就好比光谱的两头，比如一个高质量的SBVH构建器需要话费数分钟去构建它的加速体，一旦完成，射线就可以比其他类型的加速体更加高效的进行追踪，其碰撞速度肯定也会更快（意译）。然而，见表4中的Trbvh类型。
+<<>>没有任何一个加速体可以为所有的场景优化。为了让应用程序平衡取舍，OptiX会让你选择几个支持类型中的一个。你甚至可以在节点图中混合使用这些加速体。
+
+### 3.5.1 节点图中的加速体对象
+<<>>加速体是OptiX中独立的API对象，被称为rtAcceleration。当通过rtAccelerationCreate函数创建一个加速体对象后，它就会被指派给组（节点）或者几何组（节点）。节点图中的任何一个组或者几何组都要为射线与节点相交指派一个加速体对象。这个示例创建了一个几何组与一个加速体，然后连接了它们。
+
+{% highlight c++%}
+RTgeometrygroup geomgroup;
+RTacceleration accel;
+rtGeometryGroupCreate( context, &geomgroup );
+rtAccelerationCreate( context, &accel );
+rtGeometryGroupSetAcceleration( geomgroup, accel );
+{% endhighlight %}
+
+<<>>在节点图中的设置组与几何组的用途，应用程序有更高的控制权决定加速体如何构建场景中的几何体。考虑一个场景中有几个几何实例的情况，有好几种方式可以把他们按照应用程序的用途组织起来。比如，图2将所有的几何实例放在了一个几何组中，一个指派给该几何组的加速体将会构建组中所有几何实例的几何体的图元。这就允许OptiX去构建一个好像把这些几何体合并在一起（作为一个整体）的大几何体对象，这样构建出的加速体的性能与构建一个几何体之后的性能一样。一个不同的组织多几何实例的方式展现在图3中。每一个（几何）实例都放在自己独立的几何组中，也就是说每个（几何）实例拥有独立的加速体。几何组被收集在一个顶层的组（节点）中（该节点依然需要一个加速体）。加速体的构建是基于子节点的包围盒的。因为子节点通常处于节点图的底部，所以高层结构体更新速度会比较快。这种构建的优点就是如果一个几何实例发生了变化，其他几何实例的加速体必不进行重构建。然而，因为更高层的加速体是在其子节点的基础上粒度更大的构建了额外一个结构，所以图3中的节点图将会比图2中的要性能差点。再次说明下，这是一个需要应用程序平衡的地方，也就是说在这个例子中需要考虑独立的几何实例会不会频繁的变化。
+
+<<P.30两张图>>
+
+### 3.5.2 构建器与遍历器
+<<>>一个rtAcceleration对象是由一个构建器（builder）与一个遍历器（traverser）组成的。构建器的责任就是收集输入的几何体（注意：在大多数情况下，这里的“几何体”是由包围盒程式生成的轴对齐几何体）并且计算加速体中的值以便遍历器加速射线场景的相交查询。构建器与遍历器不是应用程序定义的程式，而是需要应用从表3中选择恰当的构建器与遍历器。
+
+（译注：具体内容待译）；
+|Builder/Traverser|Description|
+|:---:|:----|
+|Trbvh/Bvh||
+|Sbvh/Bvh or BvhCompact||
+|Bvh/Bvh or BvhCompact||
+|MedianBvh/Bvh or BvhCompact||
+|Lvh/Bvh or BvhCompact||
+|TriangleKdTree/KdTree||
+|NoAccel/NoAccel|
+表3 支持的构建器与遍历器
+
+<<>>表3展示了OptiX目前支持的构建器与遍历器。构建器通过rtAccelerationSetBuilder设置，对应的遍历器（一定要兼容相应的构建器）通过rtAccelerationSetTraverser设置。构建器与遍历器可以随时改动；改变一个构建器会导致加速体被标记从而重新构建。这个示例展示了一个典型的加速对象的初始化；
+
+{% highlight c++%}
+RTacceleration accel;
+rtAccelerationCreate( context, &accel );
+rtAccelerationSetBuilder( accel, "Trbvh" );
+rtAccelerationSetTraverser( accel, "Bvh" );
+{% endhighlight %}
+
+### 3.5.3 属性
+<<>>针对不同情况精调加速体的构建过程是有好处的。为了这个目的，构建器暴露了一些变量（被称作属性）见表4：
+|Property|Available in Builder|Description|
+|:---:|:---:|:---:|
+|refine|Bvh Lbvh MedianBvh|传递给BVH的改进次数，用以改善BVH的品质。默认“0”|
+|refit|Bvh Lbvh MedianBvh|默认“0”|
+|vertex_buffer_name|Sbvh Trbvh TriangleKdTree|默认“vertex_buffer”|
+|vertex_buffer_stride|Sbvh Trbvh TriangleKdTree|默认“0”|
+|index_buffer_name|Sbvh Trbvh TriangleKdTree|默认“index_buffer”|
+|index_buffer_stride|Sbvh Trbvh TriangleKdTree|默认“0”|
+|chunk_size|Trbvh||
+|builde_type|Trbvh||
+表4 加速体属性
+
+<<>>属性通过rtAccelerationSetProperty函数设置。他们的值是通过字符串形式给出的（会被OptiX解析）。只有当加速体实际上重新构建的时候，属性才会起作用。设置或者改变属性并不会令加速体自动标志为“重新构建”，如果做见下节。不能被构建器识别的属性会静默的忽视。
+
+{% highlight c++%}
+// Enable fast refitting on a BVH acceleration.
+rtAccelerationSetProperty( accel, "refit", "1");
+{% endhighlight %}
+
+### 3.5.4 加速体构建
+<<>>在OptiX中，当加速体需要被重新构建的时候就会被标记（标记为“脏”）。在rtContextLaunch调用后，所有标记了的加速体需要被重新构建才能开始执行射线追踪。每一个新创建的加速体对象初始化时都被标记以便构建。
+<<>>应用程序可以在任何时间明确的标记一个加速体让他重新构建。举个例子，如果几何组中的几何体改变了，关联在几何组上的加速体必须被重新构建。这一过程需要调用rtAccelerationMarkDirty函数。几何组中新添加几何实例或者移除几何实例也要求情加速体购新构建。
+<<>>在组（节点）上的加速体也是一样的：添加或者移除子节点，改变组中的变换节点等都需要加速体被标记而后重新构建。一般来说，每一个引起几何体改变的操作，其所在的加速体都要被重新构建（对于组而言，几何体就是子节点的AABB）。然而，有些变化是不需要被重构建的，比如一些节点图中的节点转移到了节点图中更底的位置，而其并没有影响组中子节点的包围盒。
+<<>>应用程序独立决定了每一个加速体是否需要被重新构建。OptiX将不会尝试自动检测改变，将一个加速体标记为“脏”后将不会衍生到其他加速体的标志位。要标记但是没有标记的话会导致不可预料的行为————通常就是丢失相交或者性能恶化。
+
+### 3.5.5 缓存加速数据
+<<>>加速体的构建可能会慢，这取决于构建器的选取与关联数据的复杂程度。OptiX提供了一种方式就是可以从此前构建的加速体中导出数据，这就允许应用程序可以保存加速体的数据以便此后复用。
+<<>>加速体的数据可以通过函数rtAccelerationGetData从加速对象中获取。通过函数rtAccelerationSetData进行保存。下面的例子展示了如何从一个加速体中获取数据：
+
+{% highlight c++%}
+RTsize size;
+void\* data;
+
+rtAccelerationGetDataSize(accel,&size);
+data=malloc(size);
+rtAccelerationGetData(accel,data);
+{% endhighlight %}
+
+<<>>注意，数据的获取只能从没有被标记为“脏”的加速体中获取（意思是说加速体必须已经被构建），这样规定（要求）的目的是保证数据是有效的。因此，强制让加速体构建而不经过射线追踪是有用的（译注：在调用rtContextLaunch后才会进行“脏”加速体的构建，但此后会执行射线追踪）。可以通过调用rtContextLaunch函数（传递维度变量为0）后完成（强制构建）。
+
+{% highlight c++%}
+rtContextLaunch1D(context,0,0);
+{% endhighlight %}
+
+<<>>由rtAccelerationGetData返回的数据会包含诸如构建器、遍历器还有属性等信息。成功的调用了rtAccelerationSetData后，所有这些数据都被保存在加速体中，并且该加速体被标记为“不脏”，就好像执行了一次普通的构建过程。这意味着，调用rtAccelerationSetData函数后可能会改变加速体的构建器名。
+<<>>注意，返回的数据仅包含重构建加速体的信息，而几何体的数据，组或者几何组节点图的信息没有被包含。应用程序应该保证恢复的数据匹配组（或者几何组）中的几何体，否则行为将不可定义。
+<<>>良好编码出的应用程序也应该总是准备好rtAccelerationSetData失败的情况。调用该函数失败的原因可能是OptiX改版后内部数据格式的改变，或者不同平台的兼容性。对于这种情况要得到正确结果的最直接方式就是将失败的加速体标记为“脏”，这将会导致加速体在运行中被构建而不是从缓存的数据中。
+
+{% highlight c++ %}
+if(rtAcceleratinSetDAta(accel,data,size)!=RT_SUCCESS){
+	rtAccelerationMarkDirty(accel);
+}
+{% endhighlight %}
+
+### 3.5.6 共享加速体
+<<>>可以将一个节点绑定到多个其他节点内作为其子节点的机制让节点图的组合变得灵活，（译注：待译，主要是instancing怎么翻译：and enable interesting instancing applications, Instancing can be seen as inexpensive reuse of scene objects or parts of the graph by referencing nodes multiple times instead of duplicating them.）。
+<<>>OptiX在节点图之间解耦了加速体作为分开的对象。这样，加速体就能够自然的在组、结合组之间共享，只要这些组（即合租）内部的几何体是同一个。
+
+{% highlight c++%}
+// Attach one acceleration to multiple groups;
+rtGroupSetAcceleration( group1,accel);
+rtGroupSetAcceleration( group2,accel);
+rtGroutSetAcceleration( grout3,accel);
+{% endhighlight %}
+
+<<>>每个应用程序必须保证共享的加速体能够匹配其对应的几何体。不这样做的话会导致未定义的行为。同样，加速体是不能够在组与几何组之间共享的。
+<<>>共享加速体对最大化性能是个重要的概念，如图4所示。处于中间的加速体节点绑定了2个几何组，几何组引用了同一个几何体对象。这种对加速体的重用减少了内存的使用和构建时候的时间，新加的几何组也可以像这样添加。
+<<P.37图>>
+图4 2个几何组共享一个加速体与几何对象。
+
+## 3.6 Rendering on VCA
+（暂时不译）
+
+# 第四章 程式
+<<>>这张描述了OptiX中的程式。程式提供了对射线相交，渲染，还有通用的OptiX射线追踪内核计算的可编程控制。OptiX的程式由绑定点关联起来，在射线追踪计算过程中提供了不同的语义角色。与其他概念一样，OptiX将程式抽象为对象模型叫做程式对象（program objects）。
+
+## 4.1 OptiX程式对象
+<<>>OptiX API的核心主题是可编程。OptiX的程式由CUDA C编写，通过字符串或者关联到CUDA的PTX（并行线程执行虚拟汇编语言 parallel thread execution virtual assembly language）文件提供。发布于CUDA SDK的nvcc编译器结合OptiX的头文件用来创建PTX文件。
+<<>>这些PTX文件然后通过C端API绑定到程式对象上。程式对象可以用在任何OptiX程式类型上，后面章节会讨论它们。
+
+### 管理程式对象
+<<>>OptiX提供了两种创建程式对象的入口点：rtProgramCraeteFromPTXString，与rtProgramCreateFromPTXFile。第一种从PTX源码组成的字符串中穿件程式对象。后者从磁盘的PTX文件中创建。
+
+{% highlight c++%}
+RTcontext context = ...;
+const char *ptx_filename = ...;
+const char *program_name = ...;
+RTprogram program = ...;
+rtProgramCreateFromPTXFile( context, ptx_filename, function_name, &program);
+{% endhighlight %}
+
+在这个例子中，ptx_filename是一个在磁盘上的PTX文件的名字，function_name是该文件中的一个特指的函数名。如果程式格式错误或者不能够编译，这些如何点返回错误编号。
+<<>>可以通过rtProgramValidate函数检测程式的完整性，就像下面的示例一样。
+
+{% highlight c++%}
+if( rtProgramValidate(context, program)!=RT_SUCCESS) {
+	printf( "Program is not complete." );
+}
+{% endhighlight %}
+
+<<>>从rtProgramValidate返回的错误码表示了程式对象或者其他绑定到其上的错误。最后，rtProgramGetContext函数返回拥有这段程式的上下文，而rtProgramDestroy函数表示释放自己以及关联的资源。
+
+### 4.1.2 通过变量通信
+<<>>OptiX的程式对象通过变量（variables）与C端程序通信。在OptiX中定义的变量是通过rtDeclareVariable宏申明的：
+
+{% highlight c++%}
+rtDeclareVariable(float, x, ,);
+{% endhighlight %}
+
+<<>>这个申明创建了一个类型为float的x变量，它可以通过OptiX的变量对象API对C端程序可见，也可以通过C语言的语义与G端程序通信。注意示例中后两个参数为空，但逗号依然要保留。讨论G端变量的地址是不被支持的。这表示示例中对x变量的指针或者引用是不被允许的。如果，你需要将x传递给需要float\*类型参数的的函数，你需要先拷贝x到栈中的一个变量，然后将局部的变量传递进去：
+
+{% highlight c++%}
+void my_func( float\* my_float) {…}
+RT_PROGRAM call_my_func()
+{
+	my_func(&x); // not allowed
+	float local_x = x;
+	my_func(&local_x); // allowed
+}
+{% endhighlight %}
+
+<<>>这样申明的变量可以通过rtVariableGet\*与rtVariableSet\*家族函数在C端读或者写。这样定义的变量隐式的在G端成为常变量（const-qualified）。如果从G端到C端的通信是必须的，那就使用rtBuffer对象代替变量对象。
+<<>>OptiX2.0时代，为了避免命名冲突变量会被在任意嵌套的命名空间中定义。C端变量若要引用OptiX的变量需要指定全路径。
+<<>>程式中的变量可以用语义（semantics）形式定义（译注：sematics咋翻译？）。用语义形式定义的变量将会被绑定给一个特殊的对象，OptiX在整个射线追踪内核的生命期内部管理该对象。举例来说，用rtCurrentRay语音形式定义的变量将会是个只读的程式变量，该变量会是个当前正在追踪射线的镜像：
 
 
+{% highlight c++%}
+rtDeclareVariable( optix::Ray,ray,rtCurrentRay,);
+{% endhighlight %}
 
+<<>>通过内建语音形式定义的变量只会在射线追踪的内核运行期存在，而且不能被C端修改或者查询。不同与普通的变量，一些用语义形式定义的变量可以被G端程式修改。
+<<>>定义变量的时候关联一个只读的注解（annotation）可以被C端程序翻译成人类可读的变量描述字符串。
+
+{% highlight c++%}
+rtDeclareVariable( float, shininess, , “The shininess of the sphere” );
+{% endhighlight %}
+
+<<>>变量注解是rtDeclareVariable函数的第四个参数，紧接着变量的语音形式可选参数。C端程序可以通过rtVariableGetAnnotation函数查询变量的注释。
+
+### 4.1.3 内部提供的语义形式
+
+{% highlight c++%}
+{% endhighlight %}
+
+{% highlight c++%}
+{% endhighlight %}
+
+{% highlight c++%}
+{% endhighlight %}
 ### 4.8.2 报告相交
+{% highlight c++%}
+{% endhighlight %}
 <<>>射线在遍历的过程中，当其与几何体的图元相交的时候就需要调用相交程式（译注：这里应该是射线与几何体的包围盒相交的时候就会调用相交程式）。相交程式的职责就是计算射线与图元是否真实相交，并且向后续调用提供相交的t值（t-value)。另外，相交程式也有责任计算相交处的一些细节，比如表面法线，并通过属性变量（attribute variables）提供给后续调用。
 <<>>一旦相交程式找到了t值，它必须通过调用OptiX的两个函数从而向后续步骤报告，函数是：rtProtectialIntersection与rtReportIntersection
 
