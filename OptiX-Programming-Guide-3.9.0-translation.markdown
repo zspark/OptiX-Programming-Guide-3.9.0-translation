@@ -731,13 +731,13 @@ rtGroutSetAcceleration( grout3,accel);
 （暂时不译）
 
 # 第四章 程式
-<<>>这张描述了OptiX中的程式。程式提供了对射线相交，渲染，还有通用的OptiX射线追踪内核计算的可编程控制。OptiX的程式由绑定点关联起来，在射线追踪计算过程中提供了不同的语义角色。与其他概念一样，OptiX将程式抽象为对象模型叫做程式对象（program objects）。
+<<>>这章描述了OptiX中的程式。程式提供了对射线相交，渲染，还有通用的OptiX射线追踪内核计算的可编程控制。OptiX的程式由绑定点关联起来，在射线追踪计算过程中提供了不同的语义角色。与其他概念一样，OptiX将程式抽象为对象模型叫做程式对象（program objects）。
 
 ## 4.1 OptiX程式对象
 <<>>OptiX API的核心主题是可编程。OptiX的程式由CUDA C编写，通过字符串或者关联到CUDA的PTX（并行线程执行虚拟汇编语言 parallel thread execution virtual assembly language）文件提供。发布于CUDA SDK的nvcc编译器结合OptiX的头文件用来创建PTX文件。
 <<>>这些PTX文件然后通过C端API绑定到程式对象上。程式对象可以用在任何OptiX程式类型上，后面章节会讨论它们。
 
-### 管理程式对象
+### 4.1.1 管理程式对象
 <<>>OptiX提供了两种创建程式对象的入口点：rtProgramCraeteFromPTXString，与rtProgramCreateFromPTXFile。第一种从PTX源码组成的字符串中穿件程式对象。后者从磁盘的PTX文件中创建。
 
 {% highlight c++%}
@@ -797,12 +797,58 @@ rtDeclareVariable( float, shininess, , “The shininess of the sphere” );
 <<>>变量注解是rtDeclareVariable函数的第四个参数，紧接着变量的语音形式可选参数。C端程序可以通过rtVariableGetAnnotation函数查询变量的注释。
 
 ### 4.1.3 内部提供的语义形式
+<<>>OptiX提供了5个内部语义形式以供程式变量的绑定。表5总结了它们在哪种程式中是可用的附带他们的可读写性，以及它们含义的简介。
+
+|Name|rtLaunchIndex|rtCurrentRay|rtPayload|rtIntersectionDistance|rtSubframeIndex|
+|:---:|:---:|:---:|:---:|:---:|:----:|
+|Access|read only|read only|read/write|read only|read only|
+|Description|由rtContextLaunch{1|2|3}D确定的统一线程索引|当前射线的状态|当前射线的夹带|当前射线的原点到目前已发现的最近点的参数距离|（待译）|
+|Ray Generation|Y|N|N|N|Y|
+|Exception|Y|N|N|N|Y|
+|Closest Hit|Y|Y|Y|Y|Y|
+|Any Hit|Y|Y|Y|Y|Y|
+|Miss|Y|Y|Y|N|Y|
+|Intersection|Y|Y|N|Y|Y|
+|Bounding Box|N|N|N|N|N|
+|Visit|Y|Y|Y|Y|Y|
+表5 语义变量形式
+
+### 4.1.4 属性变量
+<<>>除了OptiX提供的语义形式之外，变量还可以用用户定义的语义形式申明，用户定义的语义形式叫做属性（attributes）。不同于内建的语义形式，这种方式定义的变量必须由程序员自己管理。属性变量提供了一种相交程式与渲染程式（比如：表面法线，纹理坐标）之间的数据通行机制（译注：渲染程式包括最近碰撞、任意碰撞、失效程式三种）。属性变量只能在相交程式的rtPotentialIntersection与rtReportIntersection函数之间写值。虽然OptiX不能找到射线方向所有物体的相交情况，但是当最近碰撞程式被调用的时候，属性变量的值会被保证是在最近相交处的相关值。为此，程式应该使用属性变量（不同于夹带数据）来为相交与渲染程式之间的本地碰撞点做通信。
+<<>>下面的示例申明了一个float3形式的属性变量normal。与之关联的语义形式是用户定义的名normal_vec。这个名字是随意的（译注：是指normal），并且是这里申明的属性与最近碰撞程式里面申明的属性的连接。这两个变量不需要同名只要他们的属性名一样即可。
 
 {% highlight c++%}
+rtDeclareVariable( float3 , normal, attribute normal_vec,);
 {% endhighlight %}
 
+### 4.1.5 程式变量的作用域
+<<>>OptiX的程式变量可以用2中方式定义其变量：静态的初始化与（普遍使用的）依附到API对象的变量申明。静态初始化申明的变量如果没有依附于API对象将会一直使用那个值（译注：初始化时候的值）。静态初始化申明这样写：
+
 {% highlight c++%}
+rtDeclareVariable( float, x, ,) = 5.0f;
 {% endhighlight %}
+
+<<>>OptiX变量的作用域规则提供了一种值继承的机制，这种机制被设计用来将材质与对象参数捆绑在一起。为了这样做，每一个程式类型都有一个有序的列表，通过该列表顺序查找变量的定义。举个例子，一个最近碰撞程式引用一个名叫color的变量将会依次查找程式、几何实例、材质、上下文这些通过rt\*DeclareVariable函数定义的API对象。类似编程语言中的作用域规则（译注：比如JS的变量作用域），一个作用域内的变量会遮住在其他作用域中的同名变量。下面是每一种类型程式查找变量时的作用域。
+
+|Program type|first|second|third|fourth|
+|:---:|:---:|:---:|:---:|:---:|
+|Ray Generation|Program|Context|||
+|Exception|Program|Context|||
+|Closest Hit|Program|GeometryInstance|Material|Context|
+|Any Hit|Program|GeometryInstance|Material|Context|
+|Miss|Program|Context|||
+|Intersection|Program|GeometryInstance|Material|Context|
+|Bounding Box|Program|GeometryInstance|Material|Context|
+|Visit|Progaram|Node|||
+
+表6 每种程式作用域查找顺序（从左至右）
+
+<<>>程式依赖不同场合被调用从而变量有不同的定义是有可能的。比如，最近碰撞程式可能依附到不同的材质对象上并且有个变量叫shininess（译注：高光），我们可以依附一个变量的定义到材质对象，而该材质对象又绑定到对应的几何实例对象上。（译注：意思就是程式中的变量shininess会去查找不同材质里面定义的不同值）。
+
+<<>>在执行几何实例上的最近碰撞程式的时候（译注：最近碰撞程式是绑定到材质的，而材质是绑定到几何实例的，原文说的简单）。shininess变量的值依赖于特定的几何实例是否有这个变量的定义：如果有的话，其值就会被使用。否则变量的值就需要继续在材质对象上查询。从表6中你可以看到，程式查找几何实例作用域是在材质作用域之前。在多个作用域内定义的变量被认为是动态的并且可能会引起性能上的惩罚，动态变量最好谨慎使用。
+
+### 4.1.6 程式变量的变换
+<<>>
 
 {% highlight c++%}
 {% endhighlight %}
