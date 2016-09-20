@@ -848,10 +848,133 @@ rtDeclareVariable( float, x, ,) = 5.0f;
 <<>>在执行几何实例上的最近碰撞程式的时候（译注：最近碰撞程式是绑定到材质的，而材质是绑定到几何实例的，原文说的简单）。shininess变量的值依赖于特定的几何实例是否有这个变量的定义：如果有的话，其值就会被使用。否则变量的值就需要继续在材质对象上查询。从表6中你可以看到，程式查找几何实例作用域是在材质作用域之前。在多个作用域内定义的变量被认为是动态的并且可能会引起性能上的惩罚，动态变量最好谨慎使用。
 
 ### 4.1.6 程式变量的变换
-<<>>
+<<>>回忆当射线遍历到变换节点的时候，它会进行一次投影变换。变换后了的射线被称为是在对象空间中（object space），原始射线是在世界空间中（world space）。程式访问rtCurrentRay语义形式时所在空间总结见表7：
+
+|Ray type|spaces|
+|:---:|:---:|
+|Ray Generation|World|
+|Closest Hit|World|
+|Any Hit|Object|
+|Miss|World|
+|Intersection|Object|
+|Visit|Object|
+
+表7 每种射线类型中rtCurrentRay语义形式所在的空间
+
+<<>>为了使变量从一个空间到另一个空间的变换更加方便，OptiX的CUDA C API提供了一系列如下函数：
 
 {% highlight c++%}
+__device__ float3 rtTransformPoint( RTtransformkind kind, const float3& p )
+__device__ float3 rtTransformVector( RTtransformkind kind, const float3& v )
+__device__ float3 rtTransformNormal( RTtransformkind kind, const float3& n )
+__device__ void rtGetTransform( RTtransformkind kind, float matrix[16] )
 {% endhighlight %}
+
+<<>>前面3个函数变换float3类型的变量，比如一个点，向量，或者法线，从物体空间到世界空间，反之亦然，这取决于第一个参数的值。rtGetTransform返回一个当前变换的4X4矩阵（视第一个参数而定）。为了最好的性能，尽量使用rtTransform\*函数比实现自己的矩阵乘法好。
+
+<<>>通常变量变换发生在从相交程式到最近碰撞程式的属性转化上。相交程式通常产生属性的值，比如物体空间下的法线。最近碰撞程式如果希望用到这个属性的话，它经常必须将属性从物体空间转化到世界空间下：
+
+{% highlight c++%}
+float3 n = rtTransformNormal( RT_OBJECT_TO_WORLD, normal);
+{% endhighlight %}
+
+## 4.2 程式所支持的OptiX调用
+<<>>并不是所有的OptiX调用都会被各种类型的自定义程式所支持。比如，在相交程式里面产生一个新的射线没有意义，所以这个行为（译注：产生射线的行为）被禁止调用。下面是个完整的G端函数是否被允许调用的表格。
+
+|functions|RayGen|Exception|Closest|Any|Miss|Intersection|BB|Visit|Bindless Callable|
+|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+|rtTransform\*|X|X|O|O|O|O|O|O|X|
+|rtTrace|O|X|O|X|O|X|X|X|X|
+|rtThrow|O|X|O|O|O|O|O|O|O|
+|rtPrint|O|O|O|O|O|O|O|O|O|
+|rtTerminateRay|X|X|X|O|X|X|X|X|X|
+|rtIgnoreIntersection|X|X|X|O|X|X|X|X|X|
+|rtIntersectChild|X|X|X|X|X|X|X|O|X|
+|rtPotentialIntersection|X|X|X|X|X|O|X|X|X|
+|rtReportIntersection|X|X|X|X|X|O|X|X|X|
+|Callable Program|O|O|O|O|O|O|O|O|O|
+
+表8 G端API函数作用域
+
+## 4.3 射线生成程式
+<<>>射线生成程式是rtContextLaunch{1|2|3|}D调用后第一个进入点。于是它就像C程序中的main函数一样。任何后续的内核计算比如射线转换、读写缓存等都是从射线生成程式中引发的。然而，不同于严格的C程序，一个OptiX射线生成程式会被并行的执行许多次————每个线程一次（线程启动等暗含于rtContextLaunch{1|2|3}D的参数中）。
+
+<<>>每个线程被指派一个唯一的rtLaunchIndex。该变量的值可用于区分彼此而用在一些比如写入rtBuffer的特定位置这样的目的中：
+
+{% highlight c++%}
+rtBuffer<float, 1> output_buffer;
+rtDeclareVariable( unsigned int, index, rtLaunchIndex, );
+...;
+float result = ...;
+output_buffer[index] = result;
+{% endhighlight %}
+
+<<>>这个例子中，输出的结果被写入输出缓冲区的特定位置。普遍来说，射线生成程式可以写入缓冲区的任何位置，只要注意避免缓存之间的写入竞争条件就好。
+
+### 4.3.1 入口点索引
+<<>>为了配置射线追踪内核的执行（launch），程序员需要指定自己的射线生成程式所使用的入口点索引（entry point index）。上下文入口点的数量通过函数rtContextSetEntryPointCount指定：
+
+{% highlight c++%}
+RTcontext context = ...;
+unsigned int num_entry_points = ...;
+rtContextSetEntryPointCount( context, num_entry_points );
+{% endhighlight %}
+
+<<>>OptiX要求用这种方式创建的入口点必须关联一个射线生成程式。一个射线生成程式可能与多个入口点关联。使用rtContextSetRayGenerationProgram函数关联射线生成程式，入口点索引需要在区间[0,num_entry_points]之内。
+
+{% highlight c++%}
+RTprogram prog = ...;
+// index is >= 0 and < num_entry_points
+unsigned int index = ...;
+rtContextSetRayGenerationProgram( context, index, prog );
+{% endhighlight %}
+
+### 4.3.2 执行一个射线生成程式（Launching a Ray Genenration Program)
+<<>>rtContextLaunch{1|2|3}D函数需要一个入口点索引为参数才能执行：
+
+{% highlight c++%}
+RTsize width = ...;
+rtContextLaunch1D( context, index, width );
+{% endhighlight %}
+
+<<>>如果rtContextLaunch{1|2|3}D的入口点参数没有关联射线生成程式，执行将会失败。
+
+### 4.3.3 射线生成程式的函数签名
+<<>>在CUDA C中，射线生成程式返回void并且不需要参数。与其他OptiX程式一样，射线生成程式用CUDA C编写必须指定RT_PROGRAM限定符。下面是射线生成程式函数的原型：
+
+{% highlight c++%}
+RT_PROGRAM void ray_generation_program(void);
+{% endhighlight %}
+
+### 4.3.4 射线生成程式示例
+<<>>下面示例实现了一个渲染应用中的针孔相机模型射线生成程式。示例说明射线生成程式利用rtTrace函数初始化遍历、将结果保存进输出缓存来作为射线追踪计算的关口。注意变量eye，U，V与W。这4个变量利用C端API去指定相机的位置与朝向。
+
+{% highlight c++%}
+rtBuffer<uchar4, 2> output_buffer;
+rtDeclareVariable( uint2, index, rtLaunchIndex, );
+rtDeclareVariable( rtObject, top_object, , );
+rtDeclareVariable(float3, eye, , );
+rtDeclareVariable(float3, U, , );
+rtDeclareVariable(float3, V, , );
+rtDeclareVariable(float3, W, , );
+struct Payload {
+	uchar4 result;
+};
+
+RT_PROGRAM void pinhole_camera( void ) {
+	uint2 screen = output_buffer.size();
+	float2 d = make_float2( index ) / make_float2( screen ) * 2.f - 1.f;
+	float3 origin = eye;
+	float3 direction = normalize( d.x*U + d.y*V + W );
+	optix::Ray ray = optix::make_Ray( origin, direction, 0, 0.05f, RT_DEFAULT_MAX );
+	Payload payload;
+	rtTrace( top_object, ray, payload );
+	output_buffer[index] = payload.result;
+}
+{% endhighlight %}
+
+## 4.4 异常程式
+
 ### 4.8.2 报告相交
 {% highlight c++%}
 {% endhighlight %}
