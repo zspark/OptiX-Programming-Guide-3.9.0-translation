@@ -974,6 +974,71 @@ RT_PROGRAM void pinhole_camera( void ) {
 {% endhighlight %}
 
 ## 4.4 异常程式
+<<>>OptiX的射线追踪内核在遇到严重错误的时候会调用异常程式。异常程式提供了一种在出现错误后与C端程序通信的手段。异常程式提供的信息可供后期调用避免错误，也可用于调试程序。
+
+### 4.4.1 异常程式入口点关联
+<<>>一个异常程式通过rtContextSetExceptionProgram函数与一个入口点相关联：
+
+{% highlight c++%}
+RTcontext context = ...;
+RTprogram program = ...;
+// index is >= 0 and < num_entry_points
+unsigned int index = ...;
+rtContextSetExceptionProgram( context, index, program );
+{% endhighlight %}
+
+<<>>不同于射线生成程式，程序员可以不为入口点关联异常程式。默认情况下，入口点都会被（OptiX）内部提供一个静默忽略错误的异常程式。与射线生成程式一样，一个异常程式可以关联到许多不同的入口点。
+
+### 4.4.2 异常类型
+<<>>OptiX会在调用异常程式之前检测一堆不同的错误情况。异常程式由不同的编号定义，编号是由OptiX API定义的整形。比如，栈溢出错误的编号为RT_EXCEPTION_STACK_OVERFLOW。
+
+<<>>可以在异常程式里面通过rtGetExceptionCode查询异常的类型或者编号。更多的异常细节可以通过rtPrintExceptionDetails打印到标准输出口。
+
+<<>>除了内建的异常类型，OptiX也允许用户定义的异常。异常编号在RT_EXCEPTION_USER(0X400)与0xFFFF之间的可以用作用户自定义的异常编号。为了触发这样的一个异常，rtThrow会是这样：
+
+{% highlight c++%}
+// Define user-specified exception codes.
+#define MY_EXCEPTION_0 RT_EXCEPTION_USER + 0
+#define MY_EXCEPTION_1 RT_EXCEPTION_USER + 1
+RT_PROGRAM void some_program() {
+	...
+	// Throw user exceptions from within a program.
+	if( condition0 ) rtThrow( MY_EXCEPTION_0 );
+	if( condition1 ) rtThrow( MY_EXCEPTION_1 );
+	...
+}
+{% endhighlight %}
+
+<<>>为了避免因错误条件的检测而导致的运行时浪费，每一个异常可以通过rtContextSetExceptionEnabled函数开启或者关闭。关闭异常通常会加快性能，但是并不安全。默认情况下，只有RT_EXCEPTION_STACK_OVERFLOW是开启的。在调试期间，开启所有的异常是有用的。可以通过一个语句开启这样的功能：
+
+{% highlight c++%}
+rtContextSetExceptionEnabled(context,RT_EXCEPTION_ALL,1);
+{% endhighlight %}
+
+### 4.4.3 异常程式的函数签名
+<<>>在CUDA C中，异常程式返回void，不需要参数，并且使用RT_PROGRAM限定符：
+
+{% highlight c++%}
+RT_PROGRAM void exception_program( void );
+{% endhighlight %}
+
+### 4.4.4 异常程式示例
+<<>>下面的示例代码展示了一个向被定义为用来做像素使用的缓冲区写入一个特殊值而导致的栈溢出错误。用这样的办法，异常程式将由rtLaunchIndex指示的索引位置的像素设置为未知颜色，将不是由堆栈溢出造成的异常通过控制台打印细节。
+
+{% highlight c++%}
+rtDeclareVariable( int, launch_index, rtLaunchIndex,);
+rtDeclareVariable( float3, error, , ) = make_float3(1,0,0);
+rtBuffer<float3, 2> output_buffer;
+RT_PROGRAM void exception_program( void ) {
+	const unsigned int code = rtGetExceptionCode();
+	if( code == RT_EXCEPTION_STACK_OVERFLOW )
+		output_buffer[launch_index] = error;
+	else
+		rtPrintExceptionDetails();
+}
+{% endhighlight %}
+
+## 4.5 最近碰撞程式
 
 ### 4.8.2 报告相交
 {% highlight c++%}
