@@ -839,7 +839,7 @@ rtDeclareVariable( float, x, ,) = 5.0f;
 |Miss|Program|Context|||
 |Intersection|Program|GeometryInstance|Material|Context|
 |Bounding Box|Program|GeometryInstance|Material|Context|
-|Visit|Progaram|Node|||
+|Visit|Program|Node|||
 
 表6 每种程式作用域查找顺序（从左至右）
 
@@ -1039,6 +1039,134 @@ RT_PROGRAM void exception_program( void ) {
 {% endhighlight %}
 
 ## 4.5 最近碰撞程式
+<<>>调用rtTrace函数之后，OptiX会在确认最近的图元碰撞处调用最近碰撞程式。（待译：Closest hit programs are useful for performing primitive-dependent processing that should occur once a ray’s visibility has been established.）一个最近碰撞程式可以通过修改夹带数据或者向输出缓存写入来进行交互。它可以嵌套的调用rtTrace函数。举个例子，一个计算机图形学的应用可能需要在最近碰撞的地方实现表面渲染的算法。
+
+### 4.5.1 最近碰撞程式的材质关联
+<<>>一个最近碰撞程式与一个材质、射线类型对关联。每一个对的默认程序是没有操作。在OptiX应用中会需要许多类型的射线，但仅仅只有部分会涉及到最近碰撞程式。（意译）。程序员可以通过rtMaterialSetClosestHitProgram函数设置关联性：
+
+{% highlight c++%}
+RTmaterial material = ...;
+RTprogram program = ...;
+unsigned int type = ...;
+rtMaterialSetClosestHitProgram( material, type, program );
+{% endhighlight %}
+
+### 4.5.2 最近碰撞程式的函数签名
+<<>>在CUDA C中，最近碰撞程式返回void，不需要参数，需要RT_PROGRAM限定词：
+
+{% highlight c++%}
+RT_PROGRAM void closest_hit_program( void );
+{% endhighlight %}
+
+### 4.5.3 最近碰撞程式中的递归
+<<>>（待译：Though the rtTrace function is available to all programs with access to the rtLaunchIndex semantic, ），最近碰撞程式的常规用法是在射线与表面相交的地方执行追踪递归查询。比如，图形学应用的程序可能实现了Whitted风格的射线追踪，就是递归的执行rtTrace函数与最近碰撞程式。要注意限制递归的深度以避免堆栈溢出。
+
+### 4.5.4 最近碰撞程式举例
+<<>>下面的示例展示了一个最近碰撞程式，程式先将从相交程式计算（未展示）得到的法线从图元局部空间变换到全局坐标系下。变换后的法线通过由rtPayLoad语义形式定义的夹带数据返回。注意这段程序非常琐碎，通常变换后的法线会被最近碰撞程式用来进行一些计算（比如光照）。参见OptiX快速指引中的例子。
+
+{% highlight c++%}
+rtDeclareVariable( float3, normal, attribute normal_vec, );
+struct Payload {
+	float3 result;
+};
+
+rtDeclareVariable( Payload, ray_data, rtPayload, );
+
+RT_PROGRAM void closest_hit_program( void ) {
+	float3 norm;
+	norm = rtTransformNormal( RT_OBJECT_TO_WORLD, normal );
+	norm = normalize( norm );
+	ray_data.result = norm;
+}
+{% endhighlight %}
+
+## 4.6 任意碰撞程式
+<<>>除了最近碰撞程式之外，应用程序可能希望执行一些射线图中任意图元相交的计算。这个使用模型可以通过任意碰撞程式实现。比如，一个渲染应用可能要求得到射线途中碰到的所有图元的数量之和。
+
+### 4.6.1 任意碰撞程式的材质关联
+<<>>与最近碰撞程式相仿，任意碰撞程式也与材质、射线类型对关联。每一个对的默认关联是由内部提供的没有操作（no-op）的任意碰撞程式。
+
+<<>>可以通过rtMaterialSetAnyHitProgram函数改变关联的对（material，ray_type）：
+
+{% highlight c++%}
+RTmaterial material = ...;
+RTprogram program = ...;
+unsigned int type = ...;
+rtMaterialSetAnyHitProgram( material, type, program);
+{% endhighlight %}
+
+### 4.6.2 终止任意碰撞程式
+<<>>OptiX对任意碰撞程式的一个常规用法是终止查询相交的射线的遍历。任意碰撞程式可以通过调用rtTerminateRay函数做到这点。当应用程序仅仅需要知道是否发生了任意碰撞而碰撞结果对最近相交没有关系的时候，这项技术可以因避免多余的遍历计算而提高性能。比如，一个渲染应用可能会用它来实现阴影查询，也就是一个二维的真与假的计算。
+
+### 4.6.3 任意碰撞程式的函数签名
+<<>>在CUDA C中，任意碰撞程式返回void，不需要参数，需要RT_PROGRAM限定词：
+
+{% highlight c++%}
+RT_PROGRAM void any_hit_program( void );
+{% endhighlight %}
+
+### 4.6.4 任意碰撞程式举例
+<<>>下面的示例展示一个提前终止射线遍历相交查询的最近碰撞程式。程式还将夹带数据中的attenuation字段设置为0，用以表示与程式关联的材质是不完全透明的。
+
+{% highlight c++%}
+struct Payload {
+	float attenuation;
+};
+
+rtDeclareVariable( Payload, payload, rtPayload, );
+RT_PROGRAM void any_hit_program( void ) {
+	payload.attenuation = 0.f;
+	rtTerminateRay();
+}
+{% endhighlight %}
+
+## 4.7 丢失程式
+<<>>当一个由rtTrace函数发出的射线没有与任何图元相交的时候，丢失程式就会被调用。丢失程式可以像最近碰撞程式或者任意碰撞程式一样访问由rtPayload语义程式申明了的夹带数据。
+
+### 4.7.1 丢失程式的函数签名
+<<>>在CUDA C中，丢失程式返回void，不需要参数，需要RT_PROGRAM限定词：
+
+{% highlight c++%}
+RT_PROGRAM void miss_program( void );
+{% endhighlight %}
+
+### 4.7.2 丢失程式示例
+<<>>在计算机图形学应用中，丢失程式可能用来查询环境贴图，如下所示：
+
+{% highlight c++%}
+rtDeclareVariable( float3, environment_light, , );
+rtDeclareVariable( float3, environment_dark, , );
+rtDeclareVariable( float3, up, , );
+struct Payload {
+	float3 result;
+};
+
+rtDeclareVariable( Payload, payload, rtPayload, );
+rtDeclareVariable( optix::Ray, ray, rtCurrentRay, );
+RT_PROGRAM void miss(void) {
+	float t = max( dot( ray.direction, up ), 0.0f );
+	payload.result = lerp( environment_light,
+	environment_dark, t );
+}
+{% endhighlight %}
+
+## 4.8 相交与包围盒程式
+<<>>相交与包围盒程式用来通过算法呈现几何体。这些程式类型可以通过以下函数设置或者查询：
+
+* rtGeometrySetIntersectionProgram,
+* rtGeometryGetIntersectionProgram,
+* rtGeometrySetBoundingBoxProgram, 
+* rtGeometryGetBoundingBoxProgram.
+
+### 4.8.1 相交与包围盒程式的函数签名
+<<>>与前面提到的OptiX程式一样，在CUDA C中，相交与包围盒程式返回void，并且使用RT_PROGRAM为限定词。由于几何体是图元的集合，这些函数需要一个代表图元编号的参数去计算相交。这些参数总会是在区间[0,N)，其中N是由函数rtGeometrySetPrimitiveCount函数指定。
+
+<<>>另外，包围盒程式要求一组保存了包围盒信息的float型数组来计算，签名如下：
+
+{% highlight c++%}
+RT_PROGRAM void intersection_program( int prim_index);
+RT_PROGRAM void bounding_box_program( int prim_index, float result[6]);
+{% endhighlight %}
 
 ### 4.8.2 报告相交
 {% highlight c++%}
